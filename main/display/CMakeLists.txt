@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS
+        "display_manager.c"
+        "lcd_init_sequence.c"
+        "simple_gui.c"
+        "ui_main.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_lcd
+        freertos
+    PRIV_REQUIRES
+        m
+)
