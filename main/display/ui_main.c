@@ -55,7 +55,6 @@ static bool wifi_connected = false;
 static bool telegram_connected = false;
 static char current_time[32] = "";
 static uint8_t battery_level = 0;   // 电池电量百分比
-static uint8_t s_battery_counter = 0;  // 电池更新计数器
 static int16_t message_y_pos = 40;
 static ui_page_t s_current_page = PAGE_BOOT;
 static int s_nav_index = 0;
@@ -65,8 +64,8 @@ static bool s_splash_done = false;  // 启动画面是否结束
 // 启动页面定时器
 static esp_timer_handle_t s_splash_timer = NULL;
 
-// 时间更新定时器
-static esp_timer_handle_t s_time_timer = NULL;
+// 时间和电池更新任务
+static TaskHandle_t s_status_task = NULL;
 
 // 启动期间缓存的消息
 #define MAX_PENDING_MSGS  4
@@ -415,38 +414,40 @@ static void splash_timer_callback(void *arg)
 }
 
 // ============================================================================
-// 时间更新定时器
+// 时间和电池更新任务 (替代定时器，避免栈溢出)
 // ============================================================================
-static void time_timer_callback(void *arg)
+static void status_update_task(void *arg)
 {
     (void)arg;
+    int battery_counter = 0;
     
-    // 获取系统时间
-    time_t now = time(NULL);
-    if (now > 1700000000) {  // 时间已同步
-        struct tm tm_info;
-        localtime_r(&now, &tm_info);
-        snprintf(current_time, sizeof(current_time), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
-    } else {
-        strncpy(current_time, "--:--", sizeof(current_time) - 1);
-    }
-    
-    // 每5秒更新电池电量
-    s_battery_counter++;
-    if (s_battery_counter >= 5) {
-        s_battery_counter = 0;
-        if (battery_adc_is_ready()) {
-            int pct = battery_get_percent();
-            if (pct != battery_level) {
-                battery_level = (uint8_t)pct;
-                ESP_LOGI(TAG, "Battery: %d%%", pct);
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));  // 每秒检查一次
+        
+        // 获取系统时间
+        time_t now = time(NULL);
+        if (now > 1700000000) {  // 时间已同步
+            struct tm tm_info;
+            localtime_r(&now, &tm_info);
+            snprintf(current_time, sizeof(current_time), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
+        } else {
+            strncpy(current_time, "--:--", sizeof(current_time) - 1);
+        }
+        
+        // 每10秒更新电池电量
+        battery_counter++;
+        if (battery_counter >= 10) {
+            battery_counter = 0;
+            if (battery_adc_is_ready()) {
+                int pct = battery_get_percent();
+                battery_level = (uint8_t)pct;  // 静默更新，不输出日志
             }
         }
-    }
-    
-    // 更新状态栏
-    if (s_splash_done) {
-        update_status_bar();
+        
+        // 更新状态栏
+        if (s_splash_done) {
+            update_status_bar();
+        }
     }
 }
 
@@ -460,9 +461,9 @@ void ui_main_deinit(void)
         esp_timer_delete(s_splash_timer);
         s_splash_timer = NULL;
     }
-    if (s_time_timer) {
-        esp_timer_delete(s_time_timer);
-        s_time_timer = NULL;
+    if (s_status_task) {
+        vTaskDelete(s_status_task);
+        s_status_task = NULL;
     }
 }
 
@@ -507,26 +508,19 @@ esp_err_t ui_main_init(void)
         ESP_LOGE(TAG, "Failed to create splash timer: %s", esp_err_to_name(ret));
     }
     
-    // 创建时间更新定时器 (每秒更新一次)
-    const esp_timer_create_args_t time_timer_args = {
-        .callback = &time_timer_callback,
-        .name = "time_timer"
-    };
-    ret = esp_timer_create(&time_timer_args, &s_time_timer);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create time timer: %s", esp_err_to_name(ret));
+    // 创建时间和电池更新任务 (替代定时器，避免栈溢出)
+    xTaskCreate(status_update_task, "status_upd", 4096, NULL, 5, &s_status_task);
+    if (!s_status_task) {
+        ESP_LOGE(TAG, "Failed to create status update task");
     }
     
     // 显示启动画面
     gui_show_boot_screen();
     gui_flush();
     
-    // 启动定时器
+    // 启动启动画面定时器
     if (s_splash_timer) {
         esp_timer_start_once(s_splash_timer, 10000000); // 10秒
-    }
-    if (s_time_timer) {
-        esp_timer_start_periodic(s_time_timer, 1000000); // 每秒更新
     }
     
     ESP_LOGI(TAG, "UI initialized successfully");
