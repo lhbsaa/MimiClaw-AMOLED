@@ -12,9 +12,11 @@
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <time.h>
 
 static const char *TAG = "simple_gui";
 
@@ -103,7 +105,7 @@ static void push_pixels(const uint16_t *data, uint32_t pixel_count, bool first_s
     spi_device_polling_transmit(spi_handle, (spi_transaction_t *)&t_ext);
 }
 
-// 设置显示窗口
+// 设置显示窗口（使用 qspi_send_cmd，与 display_manager_clear 一致）
 static void set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
     uint8_t ca[4] = {x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF};
@@ -111,7 +113,6 @@ static void set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 
     qspi_send_cmd(0x2A, ca, 4);  /* Column Address Set */
     qspi_send_cmd(0x2B, ra, 4);  /* Row Address Set */
-    qspi_send_cmd(0x2C, NULL, 0); /* RAMWR */
 }
 
 // ── 帧缓冲绘图原语 ─────────────────────────────────────────────
@@ -364,7 +365,27 @@ esp_err_t simple_gui_init(void)
 // SPI DMA 单次传输最大像素数（保守值，ESP32-S3 约为 32KB）
 #define SPI_MAX_PIXELS_PER_TRANS  0x4000  // 16384 像素 = 32768 字节
 
-// 刷新帧缓冲到屏幕
+/**
+ * @brief 刷新帧缓冲到屏幕
+ * 
+ * 关键实现说明：
+ * 
+ * 1. SPI 时序必须与 display_manager_clear() 保持一致
+ * 2. 像素数据分块大小 = AMOLED_WIDTH (536像素/行)
+ * 3. 使用 spi_transaction_ext_t 结构支持变长命令/地址
+ * 
+ * 传输流程：
+ *   a) 获取 SPI 锁
+ *   b) 发送 0x2A 设置列地址 (CS: 低->传输->高)
+ *   c) 发送 0x2B 设置行地址 (CS: 低->传输->高)
+ *   d) 发送 0x2C + 像素数据 (CS: 低->传输...->高)
+ *   e) 释放 SPI 锁
+ * 
+ * 注意事项：
+ *   - 不要在此函数内部调用 qspi_send_cmd()，因为它会再次获取锁导致死锁
+ *   - 第一个像素包包含 RAMWR 命令 (0x2C)，后续包只发送数据
+ *   - 整个像素传输期间 CS 保持低电平
+ */
 void gui_flush(void)
 {
     if (!s_fb || !s_initialized) return;
@@ -372,24 +393,66 @@ void gui_flush(void)
     // 获取 SPI 锁（整个刷新操作期间持有）
     display_manager_spi_lock();
     
-    // 设置整个屏幕为显示区域
-    set_window(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    // 设置整个屏幕为显示区域（直接调用，不使用额外的函数）
+    uint8_t ca[4] = {0, 0, (uint8_t)((SCREEN_WIDTH - 1) >> 8), (uint8_t)((SCREEN_WIDTH - 1) & 0xFF)};
+    uint8_t ra[4] = {0, 0, (uint8_t)((SCREEN_HEIGHT - 1) >> 8), (uint8_t)((SCREEN_HEIGHT - 1) & 0xFF)};
     
-    // 分块推送像素数据（受限于 SPI DMA 单次传输大小）
+    // 发送列地址设置命令
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    t.flags = SPI_TRANS_MULTILINE_CMD | SPI_TRANS_MULTILINE_ADDR;
+    t.cmd = 0x02;
+    t.addr = 0x2A << 8;
+    t.tx_buffer = ca;
+    t.length = 32;
+    cs_low();
+    spi_device_polling_transmit(spi_handle, &t);
+    cs_high();
+    
+    // 发送行地址设置命令
+    t.addr = 0x2B << 8;
+    t.tx_buffer = ra;
+    cs_low();
+    spi_device_polling_transmit(spi_handle, &t);
+    cs_high();
+    
+    // 发送像素数据（与 display_manager_clear 完全一致的实现）
     bool first_send = true;
     uint32_t total_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
     uint16_t *p = s_fb;
     
-    cs_low();
+    cs_low();  // 在循环开始前 CS 低
     while (total_pixels > 0) {
-        uint32_t chunk = (total_pixels > SPI_MAX_PIXELS_PER_TRANS) ? 
-                          SPI_MAX_PIXELS_PER_TRANS : total_pixels;
-        push_pixels(p, chunk, first_send);
-        first_send = false;
-        p += chunk;
+        uint32_t chunk = (total_pixels > AMOLED_WIDTH) ? AMOLED_WIDTH : total_pixels;
+        
+        spi_transaction_ext_t t_ext = {0};
+        memset(&t_ext, 0, sizeof(t_ext));
+        
+        if (first_send) {
+            t_ext.base.flags = SPI_TRANS_MODE_QIO;
+            t_ext.base.cmd = 0x32;
+            t_ext.base.addr = 0x002C00;
+            first_send = false;
+        } else {
+            t_ext.base.flags = SPI_TRANS_MODE_QIO | SPI_TRANS_VARIABLE_CMD | SPI_TRANS_VARIABLE_ADDR | SPI_TRANS_VARIABLE_DUMMY;
+            t_ext.command_bits = 0;
+            t_ext.address_bits = 0;
+            t_ext.dummy_bits = 0;
+        }
+        
+        t_ext.base.tx_buffer = p;
+        t_ext.base.length = chunk * 16;
+        
+        esp_err_t ret = spi_device_polling_transmit(spi_handle, (spi_transaction_t *)&t_ext);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to push %lu pixels", chunk);
+            break;
+        }
+        
         total_pixels -= chunk;
+        p += chunk;
     }
-    cs_high();
+    cs_high();  // 循环结束后 CS 高
     
     // 释放 SPI 锁
     display_manager_spi_unlock();
@@ -408,16 +471,17 @@ void gui_flush_region(uint16_t x, uint16_t y, uint16_t w, uint16_t h)
     // 获取 SPI 锁
     display_manager_spi_lock();
     
+    // 设置显示区域（每个命令后 CS 会拉高）
     set_window(x, y, x + w - 1, y + h - 1);
     
     // 逐行传输（每行像素数远小于 SPI 限制，安全）
     bool first_send = true;
-    cs_low();
+    cs_low();  // CS 拉低开始发送像素数据
     for (uint16_t row = y; row < y + h; row++) {
         push_pixels(&s_fb[row * SCREEN_WIDTH + x], w, first_send);
         first_send = false;
     }
-    cs_high();
+    cs_high();  // CS 拉高结束
     
     // 释放 SPI 锁
     display_manager_spi_unlock();
@@ -583,7 +647,7 @@ void gui_show_status_bar(const char *time_str, bool wifi_connected, bool telegra
     // 显示页面标题 - 黑色，scale=3，居中
     if (page_title) {
         int16_t title_width = strlen(page_title) * 12;  // scale=2, char width=6*2
-        int16_t title_x = (SCREEN_WIDTH - title_width) / 2;
+        int16_t title_x = (SCREEN_WIDTH - title_width) / 3;
         fb_draw_string(title_x, 7, page_title, C_BLACK, 3);
     }
     
@@ -597,14 +661,14 @@ void gui_show_status_bar(const char *time_str, bool wifi_connected, bool telegra
         int16_t bat_width = strlen(bat_str) * 12;  // scale=2, 每字符12像素
         right_x -= bat_width;
         fb_draw_string(right_x, 10, bat_str, C_BLACK, 2);
-        right_x -= 15;  // 间距加大
+        right_x -= 10;  // 间距加大
     }
     
     // 显示 Telegram 状态 - 黑色文字
     if (telegram_connected) {
         right_x -= 24;  // "TG" 宽度 (2字符 * 12像素)
         fb_draw_string(right_x, 10, "TG", C_BLACK, 2);
-        right_x -= 15;  // 间距加大
+        right_x -= 10;  // 间距加大
     }
     
     // 显示 WiFi 状态 - 黑色文字
@@ -618,26 +682,147 @@ void gui_show_status_bar(const char *time_str, bool wifi_connected, bool telegra
 }
 
 // ============================================================================
-// 页面 3: 系统消息 (gui_show_system_message)
+// 页面 2b: Home页面（时间、日期、问候语）
 // ============================================================================
+void gui_show_home_page(const char *time_str, const char *date_str, const char *greeting, 
+                         bool ai_busy, uint8_t battery_pct)
+{
+    char buf[32];
+    
+    // 大字体时间（居中）
+    if (time_str && time_str[0]) {
+        int16_t time_width = strlen(time_str) * 24;  // scale=3, 每字符约24像素
+        int16_t time_x = (SCREEN_WIDTH - time_width) / 2;
+        if (time_x < 10) time_x = 10;
+        fb_draw_string(time_x, 50, time_str, C_WHITE, 3);
+    } else {
+        fb_draw_string(200, 50, "--:--", COLOR_GRAY, 3);
+    }
+    
+    // 日期显示
+    if (date_str && date_str[0]) {
+        int16_t date_width = strlen(date_str) * 12;  // scale=2
+        int16_t date_x = (SCREEN_WIDTH - date_width) / 2.5;
+        fb_draw_string(date_x, 85, date_str, COLOR_CYAN, 3);
+    }
+    
+    // 问候语
+    if (greeting && greeting[0]) {
+        int16_t greet_width = strlen(greeting) * 12;
+        int16_t greet_x = (SCREEN_WIDTH - greet_width) / 2;
+        fb_draw_string(greet_x, 125, greeting, COLOR_ORANGE, 2);
+    }
+    
+    // AI状态指示
+    const char *ai_status = ai_busy ? "AI: Working..." : "AI: Ready";
+    uint16_t ai_color = ai_busy ? COLOR_YELLOW : COLOR_GREEN;
+    int16_t ai_width = strlen(ai_status) * 12;
+    int16_t ai_x = (SCREEN_WIDTH - ai_width) / 2;
+    fb_draw_string(ai_x, 155, ai_status, ai_color, 2);
+    
+    // 电池电量条
+    int16_t bar_x = 170;
+    int16_t bar_y = 190;
+    int16_t bar_width = 176;
+    int16_t bar_height = 12;
+    
+    // 电池外框
+    fb_draw_rect(bar_x, bar_y, bar_width, bar_height, COLOR_GRAY);
+    fb_draw_rect(bar_x + bar_width, bar_y + 2, 4, bar_height - 4, COLOR_GRAY);
+    
+    // 电量填充
+    int16_t fill_width = (bar_width - 4) * battery_pct / 100;
+    uint16_t bat_color = battery_pct > 50 ? COLOR_GREEN : 
+                         (battery_pct > 20 ? COLOR_YELLOW : COLOR_RED);
+    if (fill_width > 0) {
+        fb_fill_rect(bar_x + 2, bar_y + 2, fill_width, bar_height - 4, bat_color);
+    }
+    
+    // 电量百分比
+    snprintf(buf, sizeof(buf), "%d%%", battery_pct);
+    fb_draw_string(bar_x + bar_width + 10, bar_y - 2, buf, C_WHITE, 1);
+    
+    // 底部操作提示
+    fb_draw_string(140, 215, "Press BOOT to navigate", COLOR_GRAY, 1);
+}
+
+// ============================================================================
+// 页面 3: 系统信息 (gui_show_system_info)
+// ============================================================================
+void gui_show_system_info(const char *wifi_ip, const char *llm_provider, 
+                           uint32_t free_heap, uint32_t free_psram,
+                           uint8_t battery_pct, uint32_t uptime_sec)
+{
+    char line[64];
+    int16_t y = 50;
+    
+    // WiFi 信息
+    fb_draw_string(20, y, "WiFi:", C_CYAN, 2);
+    if (wifi_ip && wifi_ip[0]) {
+        snprintf(line, sizeof(line), "%s", wifi_ip);
+        fb_draw_string(100, y, line, C_WHITE, 2);
+    } else {
+        fb_draw_string(100, y, "--", COLOR_GRAY, 2);
+    }
+    y += 28;
+    
+    // LLM 提供商
+    fb_draw_string(20, y, "LLM:", C_CYAN, 2);
+    if (llm_provider && llm_provider[0]) {
+        snprintf(line, sizeof(line), "%s", llm_provider);
+        fb_draw_string(100, y, line, C_WHITE, 2);
+    } else {
+        fb_draw_string(100, y, "--", COLOR_GRAY, 2);
+    }
+    y += 28;
+    
+    // 内存信息
+    fb_draw_string(20, y, "RAM:", C_CYAN, 2);
+    snprintf(line, sizeof(line), "%dKB", (int)(free_heap / 1024));
+    fb_draw_string(100, y, line, C_WHITE, 2);
+    y += 28;
+    
+    // PSRAM 信息
+    fb_draw_string(20, y, "PSRAM:", C_CYAN, 2);
+    snprintf(line, sizeof(line), "%dKB", (int)(free_psram / 1024));
+    fb_draw_string(100, y, line, C_WHITE, 2);
+    y += 28;
+    
+    // 电池电量
+    fb_draw_string(20, y, "BAT:", C_CYAN, 2);
+    snprintf(line, sizeof(line), "%d%%", battery_pct);
+    fb_draw_string(100, y, line, C_WHITE, 2);
+    y += 28;
+    
+    // 运行时间
+    fb_draw_string(20, y, "UPTIME:", C_CYAN, 2);
+    int hours = uptime_sec / 3600;
+    int mins = (uptime_sec % 3600) / 60;
+    int secs = uptime_sec % 60;
+    snprintf(line, sizeof(line), "%d:%02d:%02d", hours, mins, secs);
+    fb_draw_string(130, y, line, C_WHITE, 2);
+}
+
+// 显示单条系统消息（用于通知）
 void gui_show_system_message(const char *msg)
 {
     if (!msg) return;
     
-    // 计算居中位置
+    // 在屏幕中央显示消息
     int16_t msg_width = gui_string_width(msg, FONT_16x16);
     int16_t x = (SCREEN_WIDTH - msg_width) / 2;
     if (x < 20) x = 20;
     
     int16_t box_width = msg_width + 40;
+    if (box_width > SCREEN_WIDTH - 40) box_width = SCREEN_WIDTH - 40;
     int16_t box_x = (SCREEN_WIDTH - box_width) / 2;
     
-    // 绘制消息背景（深灰圆角感）
-    fb_fill_rect(box_x, 95, box_width, 36, rgb565(50, 50, 50));
-    fb_draw_rect(box_x, 95, box_width, 36, rgb565(80, 80, 80));
+    // 绘制消息背景
+    fb_fill_rect(box_x, 100, box_width, 36, rgb565(50, 50, 50));
+    fb_draw_rect(box_x, 100, box_width, 36, rgb565(80, 80, 80));
     
     // 显示消息文字
-    fb_draw_string(x, 102, msg, C_WHITE, 2);
+    fb_draw_string(x, 107, msg, C_WHITE, 2);
 }
 
 // ============================================================================
@@ -683,7 +868,7 @@ void gui_show_message(const char *sender, const char *msg, bool is_me, int16_t y
 // ============================================================================
 // 页面 5: 日志 (gui_show_log)
 // ============================================================================
-#define MAX_LOG_LINES  8
+#define MAX_LOG_LINES  6   // 减少行数以适应大字体
 static char s_log_lines[MAX_LOG_LINES][80];
 static int s_log_count = 0;
 
@@ -700,14 +885,12 @@ void gui_add_log(const char *tag, const char *message)
     }
     
     // 添加新日志行，限制总长度防止溢出
-    // 格式: "[tag] message"，预留 4 字节给 "[] " 和 null终止符
     int tag_len = strlen(tag);
     int max_msg_len = sizeof(s_log_lines[0]) - tag_len - 5;  // 5 = "[] " + null
     
     if (max_msg_len > 0) {
         snprintf(s_log_lines[s_log_count], sizeof(s_log_lines[0]), "[%s] %.*s", tag, max_msg_len, message);
     } else {
-        // tag 太长，截断
         snprintf(s_log_lines[s_log_count], sizeof(s_log_lines[0]), "[%.10s] %s", tag, message);
     }
     s_log_count++;
@@ -715,22 +898,38 @@ void gui_add_log(const char *tag, const char *message)
 
 void gui_show_log(void)
 {
-    int16_t y = 45;
+    int16_t y = 50;
     
     // 分隔线
-    fb_draw_hline(10, SCREEN_WIDTH - 10, y, C_DGRAY);
-    y += 10;
+    fb_draw_hline(10, SCREEN_WIDTH - 10, 45, C_DGRAY);
     
-    // 显示日志行
-    for (int i = 0; i < s_log_count && y < SCREEN_HEIGHT - 25; i++) {
-        fb_draw_string(15, y, s_log_lines[i], C_LGRAY, 1);
-        y += 16;
+    // 页面标题
+    fb_draw_string(240, 50, "System Logs", COLOR_CYAN, 2);
+    y = 80;
+    
+    // 显示日志行（scale=2 大字体）
+    for (int i = 0; i < s_log_count && y < SCREEN_HEIGHT - 20; i++) {
+        // 根据tag设置颜色
+        uint16_t color = C_WHITE;
+        if (strstr(s_log_lines[i], "[ERR]") || strstr(s_log_lines[i], "[error]")) {
+            color = COLOR_RED;
+        } else if (strstr(s_log_lines[i], "[WARN]") || strstr(s_log_lines[i], "[warning]")) {
+            color = COLOR_YELLOW;
+        } else if (strstr(s_log_lines[i], "[SYS]")) {
+            color = COLOR_CYAN;
+        }
+        
+        fb_draw_string(15, y, s_log_lines[i], color, 2);
+        y += 24;  // scale=2, 行高24像素
     }
     
     // 无日志提示
     if (s_log_count == 0) {
-        fb_draw_string(15, y, "(empty)", C_DGRAY, 1);
+        fb_draw_string(180, 120, "(no logs)", C_DGRAY, 2);
     }
+    
+    // 底部提示
+    fb_draw_string(150, 218, "Logs auto-scroll", COLOR_GRAY, 1);
 }
 
 void gui_clear_log(void)

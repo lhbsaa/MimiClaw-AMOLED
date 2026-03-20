@@ -86,9 +86,18 @@ void gui_show_boot_screen(void);
 // ============================================================================
 void gui_show_status_bar(const char *time_str, bool wifi_connected, bool telegram_connected, uint8_t battery_pct, const char *page_title);
 
+// Home页面（时间、日期、问候语、AI状态）
+void gui_show_home_page(const char *time_str, const char *date_str, const char *greeting, 
+                         bool ai_busy, uint8_t battery_pct);
+
 // ============================================================================
-// 页面 3: 系统消息
+// 页面 3: 系统信息
 // ============================================================================
+void gui_show_system_info(const char *wifi_ip, const char *llm_provider, 
+                           uint32_t free_heap, uint32_t free_psram,
+                           uint8_t battery_pct, uint32_t uptime_sec);
+
+// 显示单条系统消息（用于ui_add_system_message）
 void gui_show_system_message(const char *msg);
 
 // ============================================================================

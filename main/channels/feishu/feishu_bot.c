@@ -618,7 +618,7 @@ static void feishu_ws_task(void *arg)
             .buffer_size = 2048,
             .task_stack = MIMI_FEISHU_POLL_STACK,
             .reconnect_timeout_ms = s_ws_reconnect_interval_ms,
-            .network_timeout_ms = 10000,
+            .network_timeout_ms = 30000,  /* Increased from 10s to 30s */
             .disable_auto_reconnect = false,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
@@ -632,6 +632,7 @@ static void feishu_ws_task(void *arg)
         esp_websocket_client_start(s_ws_client);
 
         int64_t last_ping = 0;
+        int disconnect_count = 0;
         while (s_ws_client) {
             if (s_ws_connected) {
                 int64_t now = esp_timer_get_time() / 1000;
@@ -647,8 +648,18 @@ static void feishu_ws_task(void *arg)
                     ws_send_frame(&ping, NULL, 0, 1000);
                     last_ping = now;
                 }
+                disconnect_count = 0;  /* Reset counter when connected */
+            } else {
+                /* Only break after multiple consecutive disconnects */
+                disconnect_count++;
+                if (disconnect_count > 50) {  /* ~10 seconds of disconnection */
+                    ESP_LOGW(TAG, "WS disconnected for too long, reconnecting...");
+                    break;
+                }
             }
-            if (!esp_websocket_client_is_connected(s_ws_client) && !s_ws_connected) {
+            
+            /* Check if client is destroyed */
+            if (!esp_websocket_client_is_connected(s_ws_client) && !s_ws_connected && disconnect_count > 50) {
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -658,7 +669,7 @@ static void feishu_ws_task(void *arg)
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
         s_ws_connected = false;
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(5000));  /* Wait before reconnecting */
     }
 }
 

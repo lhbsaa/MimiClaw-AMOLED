@@ -1,6 +1,7 @@
 #include "tool_get_time.h"
 #include "mimi_config.h"
 #include "proxy/http_proxy.h"
+#include "peripherals/time_sync.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -206,6 +207,18 @@ esp_err_t tool_get_time_execute(const char *input_json, char *output, size_t out
 {
     ESP_LOGI(TAG, "Fetching current time...");
 
+    /* First check if SNTP is synchronized - use local time if available */
+    if (time_sync_is_synchronized()) {
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        strftime(output, output_size, "%Y-%m-%d %H:%M:%S %Z (%A)", &timeinfo);
+        ESP_LOGI(TAG, "Using SNTP synchronized time: %s", output);
+        return ESP_OK;
+    }
+
+    /* SNTP not synchronized, fallback to HTTP */
     esp_err_t err;
     if (http_proxy_is_enabled()) {
         ESP_LOGI(TAG, "Using proxy to fetch time");

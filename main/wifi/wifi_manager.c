@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "mimi_config.h"
+#include "peripherals/time_sync.h"
 
 #include <string.h>
 #include <inttypes.h>
@@ -66,6 +67,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Connected! IP: %s", s_ip_str);
         s_retry_count = 0;
         s_connected = true;
+
+        /* Start SNTP time sync after getting IP */
+        time_sync_init();
 
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }

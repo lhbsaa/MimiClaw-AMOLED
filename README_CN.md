@@ -142,6 +142,38 @@ Telegram 消息以聊天气泡形式显示：
 | `set_ollama <host> [port] [model]` | 配置 Ollama 本地服务 |
 | `set_api_url <url> [host]` | 配置自定义 API 地址 |
 
+### 多模型支持
+
+MimiClaw-AMOLED 支持多种 LLM 提供商，可轻松切换：
+
+| 提供商 | API 格式 | 需要 API Key | 适用场景 |
+|--------|----------|--------------|----------|
+| **ollama** | OpenAI 兼容 | 否 | 本地部署、开发测试 |
+| **openrouter** | OpenAI 兼容 | 是 | 多模型访问 |
+| **openai** | OpenAI 格式 | 是 | 生产环境（GPT 系列） |
+| **anthropic** | Anthropic 格式 | 是 | 生产环境（Claude 系列） |
+| **custom** | OpenAI 兼容 | 取决于服务 | 自建服务 |
+
+**切换提供商示例：**
+```bash
+# 切换到 Ollama 本地模型
+mimi> set_ollama 192.168.x.x 11434 qwen3.5:4b
+mimi> restart
+
+# 切换到 OpenRouter
+mimi> set_model_provider openrouter
+mimi> set_model openai/gpt-4o-mini
+mimi> set_api_key your-api-key
+mimi> restart
+```
+
+**推荐的 Ollama 模型：**
+| 模型 | 参数量 | 质量 | 速度 | 推荐场景 |
+|------|--------|------|------|----------|
+| qwen3.5:4b | 4B | ⭐⭐⭐⭐ | 快 | 日常使用，综合最佳 |
+| qwen3.5:2b | 2B | ⭐⭐⭐ | 最快 | 资源受限场景 |
+| qwen3.5:latest | ~7B | ⭐⭐⭐⭐⭐ | 中等 | 深度分析 |
+
 ### Telegram/飞书配置
 
 | 命令 | 说明 |
@@ -220,6 +252,7 @@ MimiClaw-AMOLED/
 | [DISPLAY_DRIVER.md](docs/DISPLAY_DRIVER.md) | 显示驱动：帧缓冲、QSPI、图形API |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 故障排除：常见问题及解决方案 |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构：模块设计、数据流 |
+| [TIME_QUERY_FIX.md](docs/TIME_QUERY_FIX.md) | 时间查询修复：根因分析、解决方案、模型评估 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更日志：版本历史 |
 
 ## 致谢

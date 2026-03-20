@@ -961,6 +961,11 @@ esp_err_t llm_set_provider(const char *provider)
     return ESP_OK;
 }
 
+const char *llm_get_provider_name(void)
+{
+    return s_provider;
+}
+
 esp_err_t llm_set_ollama_host(const char *host)
 {
     nvs_handle_t nvs;

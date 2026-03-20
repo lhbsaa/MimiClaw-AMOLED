@@ -318,7 +318,8 @@ static int cmd_session_clear(int argc, char **argv)
         arg_print_errors(stderr, session_clear_args.end, argv[0]);
         return 1;
     }
-    if (session_clear(session_clear_args.chat_id->sval[0]) == ESP_OK) {
+    /* session_clear now requires channel parameter, use "cli" as default for CLI */
+    if (session_clear("cli", session_clear_args.chat_id->sval[0]) == ESP_OK) {
         printf("Session cleared.\n");
     } else {
         printf("Session not found.\n");
@@ -909,6 +910,7 @@ esp_err_t serial_cli_init(void)
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl_config.prompt = "mimi> ";
     repl_config.max_cmdline_length = 512;  /* Increased for UTF-8 support */
+    repl_config.task_stack_size = 8192;    /* Increased from default for HTTP API calls */
 
 #if CONFIG_ESP_CONSOLE_UART_DEFAULT || CONFIG_ESP_CONSOLE_UART_CUSTOM
     esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();

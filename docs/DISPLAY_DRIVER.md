@@ -4,11 +4,11 @@ This document provides technical details about the AMOLED display driver impleme
 
 ## Overview
 
-MimiClaw-AMOLED uses a frame buffer architecture with 8080 parallel interface (4-bit data bus) to drive the RM67162 AMOLED display.
+MimiClaw-AMOLED uses a frame buffer architecture with QSPI (Quad SPI) interface to drive the RM67162 AMOLED display.
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   Application   │────▶│   Frame Buffer  │────▶│   8080 Driver   │
+│   Application   │────▶│   Frame Buffer  │────▶│   QSPI Driver   │
 │   (simple_gui)  │     │   (257KB PSRAM) │     │   (DMA)         │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                                                         │
@@ -37,86 +37,202 @@ Bit:  15 14 13 12 11 10 9  8  7  6  5  4  3  2  1  0
       │─── R (5-bit) ───│─── G (6-bit) ───│─── B (5-bit) ───│
 ```
 
-### Color Macros
+**注意**: 帧缓冲中的像素数据需要交换高低字节，因为 SPI 传输顺序与显示期望顺序不同。
 
 ```c
-#define RGB565(r, g, b)  (((r) << 11) | ((g) << 5) | (b))
-
-// Predefined colors
-#define COLOR_WHITE   0xFFFF
-#define COLOR_BLACK   0x0000
-#define COLOR_RED     0xF800
-#define COLOR_GREEN   0x07E0
-#define COLOR_BLUE    0x001F
-#define COLOR_CYAN    0x07FF
-#define COLOR_YELLOW  0xFFE0
+// RGB565 颜色生成并交换字节 
+static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    uint16_t c = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    return (c >> 8) | (c << 8);  // 交换高低字节
+}
 ```
 
-## QSPI Communication
+## QSPI Communication (关键实现)
 
-### Timing Parameters
+### SPI 配置参数
 
 | Parameter | Value |
 |-----------|-------|
 | Clock Speed | 40 MHz |
 | Mode | SPI Mode 0 |
 | Data Width | 4-bit (QSPI) |
-| Max Transfer | 16,384 pixels per transaction |
+| Max Transfer | 536 pixels per line (AMOLED_WIDTH) |
 
-### Initialization Sequence
+### 初始化序列
 
-The RM67162 requires a specific initialization sequence:
+RM67162 需要特定的初始化序列，详见 `display_manager.c` 的 `send_init_sequence()` 函数。
 
-```c
-// Key commands
-0x11  // Sleep out
-0x3A  // Set color format (16-bit)
-0x36  // Memory access control (rotation)
-0x29  // Display on
-```
+关键命令：
+- `0x11` - Sleep Out
+- `0x3A` - Set Pixel Format (0x55 = 16-bit)
+- `0x36` - Memory Access Control (rotation)
+- `0x29` - Display ON
 
-Full sequence in `lcd_init_sequence.c`:
+### 像素数据传输 (关键！)
 
-| Command | Parameters | Purpose |
-|---------|------------|---------|
-| 0x11 | - | Exit sleep mode |
-| 0x3A | 0x55 | 16-bit color |
-| 0x36 | 0x60 | Landscape mode |
-| 0x2A | x1, x2 | Column address |
-| 0x2B | y1, y2 | Row address |
-| 0x29 | - | Display on |
+**这是本次调试发现的核心问题所在！**
 
-### SPI Transfer Limits
-
-ESP32-S3 SPI DMA has a maximum transfer size. Large frame buffers must be chunked:
+正确的 SPI 传输实现必须与 `display_manager_clear()` 保持一致：
 
 ```c
-#define SPI_MAX_PIXELS_PER_TRANS  16384
-
-// Chunked transfer
-while (total_pixels > 0) {
-    uint32_t chunk = (total_pixels > SPI_MAX_PIXELS_PER_TRANS) ? 
-                      SPI_MAX_PIXELS_PER_TRANS : total_pixels;
-    push_pixels(p, chunk, first_send);
-    total_pixels -= chunk;
-    first_send = false;
+void gui_flush(void)
+{
+    // 1. 获取 SPI 锁
+    display_manager_spi_lock();
+    
+    // 2. 设置显示窗口 (0x2A = 列地址, 0x2B = 行地址)
+    uint8_t ca[4] = {0, 0, (SCREEN_WIDTH-1) >> 8, (SCREEN_WIDTH-1) & 0xFF};
+    uint8_t ra[4] = {0, 0, (SCREEN_HEIGHT-1) >> 8, (SCREEN_HEIGHT-1) & 0xFF};
+    
+    // 发送 0x2A 命令 - CS 低->传输->CS高
+    spi_transaction_t t;
+    t.flags = SPI_TRANS_MULTILINE_CMD | SPI_TRANS_MULTILINE_ADDR;
+    t.cmd = 0x02;
+    t.addr = 0x2A << 8;
+    t.tx_buffer = ca;
+    t.length = 32;
+    cs_low();
+    spi_device_polling_transmit(spi_handle, &t);
+    cs_high();
+    
+    // 发送 0x2B 命令 - CS 低->传输->CS高
+    t.addr = 0x2B << 8;
+    t.tx_buffer = ra;
+    cs_low();
+    spi_device_polling_transmit(spi_handle, &t);
+    cs_high();
+    
+    // 3. 发送像素数据 (0x2C = Memory Write)
+    // 使用 spi_transaction_ext_t 结构，支持变长命令/地址
+    bool first_send = true;
+    uint32_t total_pixels = SCREEN_WIDTH * SCREEN_HEIGHT;
+    uint16_t *p = s_fb;
+    
+    cs_low();  // 整个像素传输期间 CS 保持低
+    while (total_pixels > 0) {
+        uint32_t chunk = (total_pixels > AMOLED_WIDTH) ? AMOLED_WIDTH : total_pixels;
+        
+        spi_transaction_ext_t t_ext = {0};
+        
+        if (first_send) {
+            // 第一个包：发送 RAMWR 命令 (0x2C)
+            t_ext.base.flags = SPI_TRANS_MODE_QIO;
+            t_ext.base.cmd = 0x32;      // 命令模式: 0x32 = 4线命令
+            t_ext.base.addr = 0x002C00; // 地址包含命令 0x2C
+            first_send = false;
+        } else {
+            // 后续包：继续发送像素数据，无需命令
+            t_ext.base.flags = SPI_TRANS_MODE_QIO | 
+                               SPI_TRANS_VARIABLE_CMD | 
+                               SPI_TRANS_VARIABLE_ADDR | 
+                               SPI_TRANS_VARIABLE_DUMMY;
+            t_ext.command_bits = 0;
+            t_ext.address_bits = 0;
+            t_ext.dummy_bits = 0;
+        }
+        
+        t_ext.base.tx_buffer = p;
+        t_ext.base.length = chunk * 16;  // 每像素16位
+        
+        spi_device_polling_transmit(spi_handle, (spi_transaction_t *)&t_ext);
+        
+        total_pixels -= chunk;
+        p += chunk;
+    }
+    cs_high();  // 像素传输结束，CS 拉高
+    
+    // 4. 释放 SPI 锁
+    display_manager_spi_unlock();
 }
 ```
 
+### 为什么之前不工作？
+
+**错误实现**：
+- 使用了错误的分块大小 (`SPI_MAX_PIXELS_PER_TRANS = 16384`)
+- 没有正确设置 `spi_transaction_ext_t` 结构
+
+**正确实现**：
+- 分块大小 = `AMOLED_WIDTH` (536 像素，即一行)
+- 必须使用 `spi_transaction_ext_t` 并正确配置 flags
+
+## Thread Safety
+
+### SPI Mutex
+
+SPI 总线是共享资源，必须使用互斥锁保护：
+
+```c
+// 获取锁
+void display_manager_spi_lock(void) {
+    if (spi_mutex) xSemaphoreTake(spi_mutex, portMAX_DELAY);
+}
+
+// 释放锁
+void display_manager_spi_unlock(void) {
+    if (spi_mutex) xSemaphoreGive(spi_mutex);
+}
+```
+
+**重要**：在持有锁期间，不能再调用会获取锁的函数，否则会死锁！
+
+例如：`gui_flush()` 已获取锁，内部调用的函数必须直接操作 SPI，不能再调用 `qspi_send_cmd()`（它会再次获取锁）。
+
+## 页面切换机制
+
+### 问题：定时器上下文限制
+
+**错误做法**：在 ESP Timer 回调中直接执行 `ui_show_page()` 和 `gui_flush()`
+
+```c
+// 错误！定时器任务栈空间有限，SPI 操作可能失败
+static void splash_timer_callback(void *arg) {
+    ui_show_page(PAGE_STATUS_BAR);  // 可能导致问题
+}
+```
+
+**正确做法**：定时器只设置标志，任务上下文执行实际操作
+
+```c
+// 定时器回调：只设置标志
+static void splash_timer_callback(void *arg) {
+    if (s_current_page == PAGE_BOOT) {
+        s_splash_done = true;  // 设置标志
+    }
+}
+
+// 任务上下文：检测标志并执行操作
+static void status_update_task(void *arg) {
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        if (s_splash_done && s_current_page == PAGE_BOOT) {
+            ui_show_page(PAGE_STATUS_BAR);  // 安全执行
+        }
+    }
+}
+```
+
+### 为什么？
+
+- ESP Timer 任务栈空间有限（默认 4KB）
+- SPI 操作和 `gui_flush()` 需要更多栈空间
+- FreeRTOS 任务栈可配置（如 4096 字节）
+
 ## Graphics Primitives
 
-### Drawing Functions
+### 绘图函数
 
 | Function | Description |
 |----------|-------------|
-| `fb_clear(color)` | Clear frame buffer with color |
-| `fb_draw_pixel(x, y, color)` | Draw single pixel |
-| `fb_draw_hline(x1, x2, y, color)` | Draw horizontal line |
-| `fb_draw_rect(x, y, w, h, color)` | Draw filled rectangle |
-| `fb_draw_char(x, y, c, color, scale)` | Draw character |
-| `fb_draw_string(x, y, str, color, scale)` | Draw string |
+| `gui_clear_screen(color)` | 清屏 |
+| `gui_draw_pixel(x, y, color)` | 画点 |
+| `gui_draw_hline(x1, x2, y, color)` | 画水平线 |
+| `gui_fill_rect(x, y, w, h, color)` | 画填充矩形 |
+| `gui_draw_string(x, y, str, color, scale)` | 画字符串 |
 
-### Font Rendering
+### 字体缩放
 
 | Scale | Character Size |
 |-------|----------------|
@@ -125,132 +241,45 @@ while (total_pixels > 0) {
 | 3 | 18 × 24 pixels |
 | 4 | 24 × 32 pixels |
 
-## Display Window
-
-### Address Window Setup
-
-Before writing pixels, set the display window:
-
-```c
-// Set column address (X range)
-write_cmd(0x2A);
-write_data(x_start >> 8);
-write_data(x_start & 0xFF);
-write_data(x_end >> 8);
-write_data(x_end & 0xFF);
-
-// Set row address (Y range)
-write_cmd(0x2B);
-write_data(y_start >> 8);
-write_data(y_start & 0xFF);
-write_data(y_end >> 8);
-write_data(y_end & 0xFF);
-
-// Write pixels
-write_cmd(0x2C);  // Memory write
-```
-
-### Full Screen Update
-
-```c
-void gui_flush(void) {
-    set_window(0, SCREEN_WIDTH - 1, 0, SCREEN_HEIGHT - 1);
-    push_pixels(frame_buffer, SCREEN_WIDTH * SCREEN_HEIGHT);
-}
-```
-
-## Thread Safety
-
-### SPI Mutex
-
-The SPI bus is shared and protected by a mutex:
-
-```c
-static SemaphoreHandle_t s_spi_mutex;
-
-void spi_lock(void) {
-    xSemaphoreTake(s_spi_mutex, portMAX_DELAY);
-}
-
-void spi_unlock(void) {
-    xSemaphoreGive(s_spi_mutex);
-}
-```
-
-### Usage Pattern
-
-```c
-spi_lock();
-qspi_send_cmd(...);
-qspi_send_data(...);
-spi_unlock();
-```
-
 ## Power Management
 
 ### Sleep Mode
 
 ```c
 void display_manager_sleep(void) {
-    qspi_send_cmd(0x10, NULL, 0);  // Enter sleep mode
-    // Optional: reduce backlight or turn off
+    // 发送 Sleep In 命令 (0x10)
+    qspi_send_cmd(0x10, NULL, 0);
 }
 
 void display_manager_wakeup(void) {
-    qspi_send_cmd(0x11, NULL, 0);  // Exit sleep mode
-    vTaskDelay(pdMS_TO_TICKS(120)); // Wait for display
+    // 发送 Sleep Out 命令 (0x11)
+    qspi_send_cmd(0x11, NULL, 0);
+    vTaskDelay(pdMS_TO_TICKS(120));  // 等待显示唤醒
+    qspi_send_cmd(0x29, NULL, 0);    // Display ON
 }
 ```
 
-### Backlight Control
+## 常见问题与解决方案
 
-```c
-// GPIO 38 - Backlight with PWM
-ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-```
-
-## Performance Optimization
-
-### Memory Allocation
-
-```c
-// Frame buffer - use PSRAM (larger, slower)
-s_fb = heap_caps_calloc(size, 1, MALLOC_CAP_SPIRAM);
-
-// Line buffer - use DMA-capable memory (faster)
-line_buf = heap_caps_malloc(width * 2, MALLOC_CAP_DMA);
-```
-
-### Transfer Optimization
-
-1. **Chunk transfers** to avoid DMA overflow
-2. **Use DMA memory** for line buffers
-3. **Minimize window changes** by batching draws
-
-## Common Issues
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| Blank screen | Wrong initialization | Check init sequence |
-| Garbled display | Timing issues | Reduce SPI clock |
-| Transfer error | Buffer too large | Reduce chunk size |
-| Tearing | No vsync | Consider double buffering |
-
-## Touch Controller
-
-> **Note**: T-Display-S3 AMOLED v1.0 does **not** include touch functionality. The CST816S driver code (`touch_cst816s.c`) is included for future v1.1 compatibility but is not used.
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| 屏幕不更新 | SPI 传输结构配置错误 | 使用与 `display_manager_clear()` 一致的实现 |
+| 页面切换无效 | 在定时器上下文执行 SPI 操作 | 使用标志+任务上下文方式 |
+| 死锁 | 嵌套获取 SPI 锁 | 检查函数调用链，避免重复获取锁 |
+| 屏幕花屏 | 字节序错误 | RGB565 数据需交换高低字节 |
+| 显示撕裂 | 无垂直同步 | 考虑双缓冲 |
 
 ## File References
 
 | File | Purpose |
 |------|---------|
-| `display_manager.c` | QSPI driver, initialization |
-| `lcd_init_sequence.c` | RM67162 init commands |
-| `simple_gui.c` | Frame buffer, graphics |
-| `ui_main.c` | UI controller |
+| `display_manager.c` | QSPI 驱动、显示初始化 |
+| `display_manager.h` | 公共接口定义 |
+| `simple_gui.c` | 帧缓冲、图形绘制、`gui_flush()` |
+| `simple_gui.h` | GUI 公共接口 |
+| `ui_main.c` | UI 控制器、页面切换逻辑 |
 
 ## Related Documentation
 
-- [Hardware Reference](HARDWARE.md) - Pin definitions
+- [Hardware Reference](HARDWARE.md) - 引脚定义
 - [RM67162 Datasheet](../LilyGo-AMOLED-Series-1.2.4/datasheet/RM67162%20DataSheet.pdf)

@@ -8,6 +8,8 @@
 #include "display_manager.h"
 #include "../peripherals/boot_button.h"
 #include "../peripherals/battery_adc.h"
+#include "../wifi/wifi_manager.h"
+#include "../llm/llm_proxy.h"
 #include "esp_log.h"
 #include <string.h>
 #include <time.h>
@@ -15,6 +17,7 @@
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "ui_main";
 
@@ -117,15 +120,59 @@ static void ui_show_page(ui_page_t page)
     
     switch (page) {
         case PAGE_STATUS_BAR:
-            // 状态栏页面 - 显示欢迎信息
-            gui_draw_string(200, 100, "MimiClaw", COLOR_WHITE, 4);
-            gui_draw_string(230, 145, "Ready", COLOR_GREEN, 2);
+            // Home页面 - 时间、日期、问候语、AI状态
+            gui_draw_hline(12, SCREEN_WIDTH - 12, 45, COLOR_DARK_GRAY);
+            {
+                // 获取日期信息
+                char date_str[32] = "";
+                char greeting[32] = "";
+                
+                time_t now = time(NULL);
+                if (now > 1700000000) {
+                    struct tm tm_info;
+                    localtime_r(&now, &tm_info);
+                    
+                    // 格式化日期
+                    const char *weekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+                    snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d %s", 
+                             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                             weekdays[tm_info.tm_wday]);
+                    
+                    // 根据时间段生成问候语
+                    int hour = tm_info.tm_hour;
+                    if (hour >= 5 && hour < 12) {
+                        strcpy(greeting, "Good Morning!");
+                    } else if (hour >= 12 && hour < 18) {
+                        strcpy(greeting, "Good Afternoon!");
+                    } else if (hour >= 18 && hour < 22) {
+                        strcpy(greeting, "Good Evening!");
+                    } else {
+                        strcpy(greeting, "Good Night!");
+                    }
+                } else {
+                    strcpy(date_str, "----/--/-- ---");
+                    strcpy(greeting, "Hello!");
+                }
+                
+                uint8_t bat_pct = battery_adc_is_ready() ? battery_get_percent() : 0;
+                gui_show_home_page(current_time, date_str, greeting, false, bat_pct);
+            }
             break;
             
         case PAGE_SYSTEM_MSG:
-            // 系统消息页面
+            // 系统信息页面
             gui_draw_hline(12, SCREEN_WIDTH - 12, 45, COLOR_DARK_GRAY);
-            gui_show_system_message("Running");
+            {
+                // 获取系统信息
+                const char *wifi_ip = wifi_manager_get_ip();
+                const char *llm_provider = llm_get_provider_name();
+                uint32_t free_heap = esp_get_free_heap_size();
+                uint32_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+                uint8_t bat_pct = battery_adc_is_ready() ? battery_get_percent() : 0;
+                uint32_t uptime = (uint32_t)(esp_timer_get_time() / 1000000);
+                
+                gui_show_system_info(wifi_ip, llm_provider, free_heap, free_psram, bat_pct, uptime);
+            }
             break;
             
         case PAGE_MESSAGE:
@@ -161,6 +208,16 @@ static void ui_show_page(ui_page_t page)
 // ============================================================================
 // 状态更新
 // ============================================================================
+
+/**
+ * @brief 更新状态栏
+ * 
+ * 注意：此函数会调用 gui_flush() 刷新屏幕
+ * - gui_show_status_bar() 只绘制状态栏区域（顶部 35 像素）
+ * - gui_flush() 会传输整个帧缓冲到屏幕（257KB）
+ * 
+ * 性能考虑：每秒调用一次可能影响性能，后续可优化为只刷新变化区域
+ */
 static void update_status_bar(void)
 {
     if (s_current_page != PAGE_BOOT) {
@@ -393,36 +450,75 @@ static void on_very_long_press(void)
 // ============================================================================
 // 启动页面定时器
 // ============================================================================
+/**
+ * @brief 启动画面定时器回调
+ * 
+ * 设计说明：
+ *   - 此函数在 ESP Timer 任务上下文中执行
+ *   - ESP Timer 任务栈空间有限（默认 4KB），不适合执行 SPI 操作
+ *   - 因此只设置标志 s_splash_done，实际页面切换在 status_update_task 中执行
+ * 
+ * 为什么不在定时器中直接切换页面？
+ *   1. SPI 操作需要较大栈空间
+ *   2. gui_flush() 需要传输 257KB 数据
+ *   3. 定时器上下文可能因栈不足导致崩溃或功能异常
+ */
 static void splash_timer_callback(void *arg)
 {
     (void)arg;
-    // 10秒后从启动页面自动切换到状态栏页面
+    // 10秒后设置标志，让 status_update_task 执行页面切换
+    // 不在定时器上下文中直接执行 SPI 操作，避免栈溢出
     if (s_current_page == PAGE_BOOT) {
         ESP_LOGI(TAG, "Splash timeout - switch to Status page");
-        s_nav_initialized = true;
         s_splash_done = true;
-        s_current_page = PAGE_STATUS_BAR;
-        s_nav_index = 0;
-        ui_show_page(PAGE_STATUS_BAR);
-        
-        // 显示启动期间缓存的消息
-        for (int i = 0; i < s_pending_count; i++) {
-            gui_add_log("SYS", s_pending_msgs[i]);
-        }
-        s_pending_count = 0;
     }
 }
 
 // ============================================================================
 // 时间和电池更新任务 (替代定时器，避免栈溢出)
 // ============================================================================
+
+/**
+ * @brief 状态更新任务
+ * 
+ * 此任务在 FreeRTOS 任务上下文中运行，栈空间充足（4096 字节），
+ * 可以安全执行 SPI 操作。
+ * 
+ * 主要功能：
+ *   1. 检测启动画面超时标志，执行页面切换
+ *   2. 更新系统时间显示
+ *   3. 定期更新电池电量
+ *   4. 更新状态栏
+ * 
+ * 设计说明：
+ *   - 页面切换需要调用 ui_show_page() -> gui_flush() -> SPI 操作
+ *   - 这些操作需要足够的栈空间，不适合在定时器回调中执行
+ *   - 因此使用 "定时器设置标志 + 任务检测执行" 的模式
+ */
 static void status_update_task(void *arg)
 {
     (void)arg;
     int battery_counter = 0;
+    bool splash_switched = false;  // 确保只切换一次
     
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));  // 每秒检查一次
+        
+        // 检查是否需要切换启动页面（在任务上下文中执行，有足够栈空间）
+        if (s_splash_done && !splash_switched && s_current_page == PAGE_BOOT) {
+            splash_switched = true;
+            s_nav_initialized = true;
+            s_current_page = PAGE_STATUS_BAR;
+            s_nav_index = 0;
+            ui_show_page(PAGE_STATUS_BAR);
+            
+            // 显示启动期间缓存的消息
+            for (int i = 0; i < s_pending_count; i++) {
+                gui_add_log("SYS", s_pending_msgs[i]);
+            }
+            s_pending_count = 0;
+            continue;  // 跳过本次循环，下一秒再更新状态栏
+        }
         
         // 获取系统时间
         time_t now = time(NULL);
@@ -445,7 +541,7 @@ static void status_update_task(void *arg)
         }
         
         // 更新状态栏
-        if (s_splash_done) {
+        if (s_splash_done && s_current_page != PAGE_BOOT) {
             update_status_bar();
         }
     }

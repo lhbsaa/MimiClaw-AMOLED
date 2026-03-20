@@ -142,6 +142,38 @@ Connect via serial (115200 baud) for configuration and debugging.
 | `set_ollama <host> [port] [model]` | Configure Ollama local server |
 | `set_api_url <url> [host]` | Configure custom API URL |
 
+### Multi-Model Support
+
+MimiClaw-AMOLED supports multiple LLM providers with easy switching:
+
+| Provider | API Format | API Key Required | Use Case |
+|----------|------------|------------------|----------|
+| **ollama** | OpenAI-compatible | No | Local deployment, development |
+| **openrouter** | OpenAI-compatible | Yes | Multiple model access |
+| **openai** | OpenAI format | Yes | Production (GPT models) |
+| **anthropic** | Anthropic format | Yes | Production (Claude models) |
+| **custom** | OpenAI-compatible | Depends | Self-hosted services |
+
+**Switch Provider Example:**
+```bash
+# Switch to Ollama local model
+mimi> set_ollama 192.168.x.x 11434 qwen3.5:4b
+mimi> restart
+
+# Switch to OpenRouter
+mimi> set_model_provider openrouter
+mimi> set_model openai/gpt-4o-mini
+mimi> set_api_key your-api-key
+mimi> restart
+```
+
+**Recommended Ollama Models:**
+| Model | Params | Quality | Speed | Recommended For |
+|-------|--------|---------|-------|-----------------|
+| qwen3.5:4b | 4B | ⭐⭐⭐⭐ | Fast | Daily use, balanced |
+| qwen3.5:2b | 2B | ⭐⭐⭐ | Fastest | Resource-limited |
+| qwen3.5:latest | ~7B | ⭐⭐⭐⭐⭐ | Medium | Deep analysis |
+
 ### Telegram/Feishu Configuration
 
 | Command | Description |
@@ -220,6 +252,7 @@ MimiClaw-AMOLED/
 | [DISPLAY_DRIVER.md](docs/DISPLAY_DRIVER.md) | Display driver: frame buffer, QSPI, graphics API |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Troubleshooting: common issues and solutions |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture: modules, data flow |
+| [TIME_QUERY_FIX.md](docs/TIME_QUERY_FIX.md) | Time query fix: root cause, solution, model evaluation |
 | [CHANGELOG.md](CHANGELOG.md) | Change log: version history |
 
 ## Acknowledgments

@@ -5,6 +5,7 @@
 #include "tools/tool_files.h"
 #include "tools/tool_cron.h"
 #include "tools/tool_gpio.h"
+#include "tools/tool_hardware.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -213,6 +214,42 @@ esp_err_t tool_registry_init(void)
         .execute = tool_gpio_read_all_execute,
     };
     register_tool(&ga);
+
+    /* Register Hardware tools */
+    tool_hardware_init();
+
+    mimi_tool_t batt = {
+        .name = "battery_status",
+        .description = "获取电池真实数据。返回精确电压(mV)、电量百分比、充电状态。当用户询问电池/电量/电压/电源/续航时必须调用此工具，禁止猜测或估算。",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_battery_status_execute,
+    };
+    register_tool(&batt);
+
+    mimi_tool_t temp = {
+        .name = "chip_temperature",
+        .description = "读取ESP32-S3芯片内部温度（摄氏度）。当用户询问温度/芯片温度/设备温度时必须调用此工具。",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{},"
+            "\"required\":[]}",
+        .execute = tool_chip_temperature_execute,
+    };
+    register_tool(&temp);
+
+    mimi_tool_t led = {
+        .name = "led_control",
+        .description = "Control the onboard LED. State can be 'on', 'off', or 'toggle'. Useful for visual indicators.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{\"state\":{\"type\":\"string\",\"description\":\"LED state: 'on', 'off', or 'toggle'\"}},"
+            "\"required\":[\"state\"]}",
+        .execute = tool_led_control_execute,
+    };
+    register_tool(&led);
 
     build_tools_json();
 

@@ -22,6 +22,7 @@ idf_component_register(
         "tools/tool_files.c"
         "tools/tool_gpio.c"
         "tools/gpio_policy.c"
+        "tools/tool_hardware.c"
         "skills/skill_loader.c"
         "onboard/wifi_onboard.c"
         # AMOLED Display driver files
@@ -33,6 +34,7 @@ idf_component_register(
         # Peripherals
         "peripherals/boot_button.c"
         "peripherals/battery_adc.c"
+        "peripherals/time_sync.c"
     INCLUDE_DIRS
         "."
     REQUIRES

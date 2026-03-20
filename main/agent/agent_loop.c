@@ -5,9 +5,11 @@
 #include "llm/llm_proxy.h"
 #include "memory/session_mgr.h"
 #include "tools/tool_registry.h"
+#include "peripherals/time_sync.h"
 
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -17,6 +19,27 @@
 static const char *TAG = "agent";
 
 #define TOOL_OUTPUT_SIZE  (8 * 1024)
+
+/* Check if message is time-related */
+static bool is_time_related_question(const char *msg)
+{
+    if (!msg) return false;
+    
+    const char *keywords[] = {
+        "时间", "几点", "日期", "几号", "今天", "明天", "昨天",
+        "今年", "去年", "明年", "星期", "周几", "哪年",
+        "what time", "what date", "what day", "what year",
+        "current time", "current date", "now",
+        NULL
+    };
+    
+    for (int i = 0; keywords[i]; i++) {
+        if (strcasestr(msg, keywords[i])) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* Build the assistant content array from llm_response_t for the messages history.
  * Returns a cJSON array with text and tool_use blocks. */
@@ -198,17 +221,50 @@ static void agent_loop_task(void *arg)
         ESP_LOGI(TAG, "LLM turn context: channel=%s chat_id=%s", msg.channel, msg.chat_id);
 
         /* 2. Load session history into cJSON array */
-        session_get_history_json(msg.chat_id, history_json,
+        session_get_history_json(msg.channel, msg.chat_id, history_json,
                                  MIMI_LLM_STREAM_BUF_SIZE, MIMI_AGENT_MAX_HISTORY);
 
         cJSON *messages = cJSON_Parse(history_json);
         if (!messages) messages = cJSON_CreateArray();
 
         /* 3. Append current user message */
+        /* For time-related questions, pre-fetch time and inject into user message */
+        char *user_content = NULL;
+        if (is_time_related_question(msg.content)) {
+            ESP_LOGI(TAG, "Time-related question detected, fetching current time...");
+            
+            /* Wait for SNTP sync first */
+            if (!time_sync_is_synchronized()) {
+                ESP_LOGW(TAG, "Time not synchronized, waiting for SNTP sync...");
+                time_sync_wait(5000);
+            }
+            
+            /* Call get_current_time tool to get accurate time */
+            char time_result[256] = {0};
+            esp_err_t time_err = tool_registry_execute("get_current_time", "{}", time_result, sizeof(time_result));
+            
+            if (time_err == ESP_OK && strlen(time_result) > 0) {
+                ESP_LOGI(TAG, "Time fetched from tool: %s", time_result);
+                
+                /* Inject time INTO user message content - LLM must see this */
+                size_t new_len = strlen(msg.content) + strlen(time_result) + 200;
+                user_content = malloc(new_len);
+                if (user_content) {
+                    snprintf(user_content, new_len, 
+                        "%s\n\n【当前时间: %s】\n注意：时间信息已由系统提供，请直接使用上述时间回答问题，不要调用 get_current_time 工具。",
+                        msg.content, time_result);
+                }
+            }
+        }
+        
         cJSON *user_msg = cJSON_CreateObject();
         cJSON_AddStringToObject(user_msg, "role", "user");
-        cJSON_AddStringToObject(user_msg, "content", msg.content);
+        cJSON_AddStringToObject(user_msg, "content", user_content ? user_content : msg.content);
         cJSON_AddItemToArray(messages, user_msg);
+        
+        if (user_content) {
+            free(user_content);
+        }
 
         /* 4. ReAct loop */
         char *final_text = NULL;
@@ -275,8 +331,8 @@ static void agent_loop_task(void *arg)
         /* 5. Send response */
         if (final_text && final_text[0]) {
             /* Save to session (only user text + final assistant text) */
-            esp_err_t save_user = session_append(msg.chat_id, "user", msg.content);
-            esp_err_t save_asst = session_append(msg.chat_id, "assistant", final_text);
+            esp_err_t save_user = session_append(msg.channel, msg.chat_id, "user", msg.content);
+            esp_err_t save_asst = session_append(msg.channel, msg.chat_id, "assistant", final_text);
             if (save_user != ESP_OK || save_asst != ESP_OK) {
                 ESP_LOGW(TAG, "Session save failed for chat %s (user=%s, assistant=%s)",
                          msg.chat_id,

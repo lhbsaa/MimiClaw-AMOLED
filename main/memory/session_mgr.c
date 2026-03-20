@@ -11,21 +11,44 @@
 
 static const char *TAG = "session";
 
-static void session_path(const char *chat_id, char *buf, size_t size)
+static void session_path(const char *channel, const char *chat_id, char *buf, size_t size)
 {
-    snprintf(buf, size, "%s/tg_%s.jsonl", MIMI_SPIFFS_SESSION_DIR, chat_id);
+    /* Use short prefix to keep filename within SPIFFS limits (32-64 chars) */
+    const char *prefix = "s";
+    if (channel) {
+        if (strcmp(channel, "telegram") == 0) {
+            prefix = "st";
+        } else if (strcmp(channel, "feishu") == 0) {
+            prefix = "sf";
+        } else if (strcmp(channel, "cli") == 0) {
+            prefix = "sc";
+        } else if (strcmp(channel, "websocket") == 0) {
+            prefix = "sw";
+        }
+    }
+    
+    /* Use hash of chat_id if too long to fit SPIFFS filename limit */
+    size_t chat_id_len = strlen(chat_id);
+    if (chat_id_len > 32) {
+        /* Simple hash: use first 16 and last 8 chars */
+        char short_id[32];
+        snprintf(short_id, sizeof(short_id), "%.16s_%.8s", chat_id, chat_id + chat_id_len - 8);
+        snprintf(buf, size, "%s/%s%s.jl", MIMI_SPIFFS_BASE, prefix, short_id);
+    } else {
+        snprintf(buf, size, "%s/%s%s.jl", MIMI_SPIFFS_BASE, prefix, chat_id);
+    }
 }
 
 esp_err_t session_mgr_init(void)
 {
-    ESP_LOGI(TAG, "Session manager initialized at %s", MIMI_SPIFFS_SESSION_DIR);
+    ESP_LOGI(TAG, "Session manager initialized (files in %s)", MIMI_SPIFFS_BASE);
     return ESP_OK;
 }
 
-esp_err_t session_append(const char *chat_id, const char *role, const char *content)
+esp_err_t session_append(const char *channel, const char *chat_id, const char *role, const char *content)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char path[96];
+    session_path(channel, chat_id, path, sizeof(path));
 
     FILE *f = fopen(path, "a");
     if (!f) {
@@ -50,10 +73,10 @@ esp_err_t session_append(const char *chat_id, const char *role, const char *cont
     return ESP_OK;
 }
 
-esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, int max_msgs)
+esp_err_t session_get_history_json(const char *channel, const char *chat_id, char *buf, size_t size, int max_msgs)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char path[96];
+    session_path(channel, chat_id, path, sizeof(path));
 
     FILE *f = fopen(path, "r");
     if (!f) {
@@ -125,10 +148,10 @@ esp_err_t session_get_history_json(const char *chat_id, char *buf, size_t size, 
     return ESP_OK;
 }
 
-esp_err_t session_clear(const char *chat_id)
+esp_err_t session_clear(const char *channel, const char *chat_id)
 {
-    char path[64];
-    session_path(chat_id, path, sizeof(path));
+    char path[96];
+    session_path(channel, chat_id, path, sizeof(path));
 
     if (remove(path) == 0) {
         ESP_LOGI(TAG, "Session %s cleared", chat_id);
@@ -139,20 +162,22 @@ esp_err_t session_clear(const char *chat_id)
 
 void session_list(void)
 {
-    DIR *dir = opendir(MIMI_SPIFFS_SESSION_DIR);
+    DIR *dir = opendir(MIMI_SPIFFS_BASE);
     if (!dir) {
-        /* SPIFFS is flat, so list all files matching pattern */
-        dir = opendir(MIMI_SPIFFS_BASE);
-        if (!dir) {
-            ESP_LOGW(TAG, "Cannot open SPIFFS directory");
-            return;
-        }
+        ESP_LOGW(TAG, "Cannot open SPIFFS directory");
+        return;
     }
 
     struct dirent *entry;
     int count = 0;
     while ((entry = readdir(dir)) != NULL) {
-        if (strstr(entry->d_name, "tg_") && strstr(entry->d_name, ".jsonl")) {
+        /* Match all session files: st*, sf*, sc*, sw*, s* with .jl extension */
+        if (strstr(entry->d_name, ".jl") && 
+            (strncmp(entry->d_name, "st", 2) == 0 ||
+             strncmp(entry->d_name, "sf", 2) == 0 ||
+             strncmp(entry->d_name, "sc", 2) == 0 ||
+             strncmp(entry->d_name, "sw", 2) == 0 ||
+             strncmp(entry->d_name, "s", 1) == 0)) {
             ESP_LOGI(TAG, "  Session: %s", entry->d_name);
             count++;
         }

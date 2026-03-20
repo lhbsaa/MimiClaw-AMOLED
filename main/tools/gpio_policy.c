@@ -113,6 +113,42 @@ bool gpio_policy_pin_forbidden_hint(int pin, char *result, size_t result_len)
                  pin);
         return true;
     }
+    /* Octal PSRAM uses GPIO 26-37 */
+    if (pin >= 26 && pin <= 37) {
+        snprintf(result, result_len,
+                 "Error: pin %d is reserved for Octal PSRAM (GPIO26-37); choose a different pin",
+                 pin);
+        return true;
+    }
+    /* LCD pins */
+    if (pin == 5 || pin == 6 || pin == 7 || pin == 8 || pin == 9 ||
+        pin == 17 || pin == 18 || pin == 47 || pin == 48) {
+        snprintf(result, result_len,
+                 "Error: pin %d is used by LCD display; choose a different pin",
+                 pin);
+        return true;
+    }
+    /* Battery ADC */
+    if (pin == 4) {
+        snprintf(result, result_len,
+                 "Error: pin %d is used for battery voltage ADC; choose a different pin",
+                 pin);
+        return true;
+    }
+    /* Boot button */
+    if (pin == 0) {
+        snprintf(result, result_len,
+                 "Error: pin %d is used by Boot button; choose a different pin",
+                 pin);
+        return true;
+    }
+    /* LED/LCD power */
+    if (pin == 38) {
+        snprintf(result, result_len,
+                 "Error: pin %d is used for LED and LCD power control; choose a different pin",
+                 pin);
+        return true;
+    }
 #else
     (void)pin;
     (void)result;
