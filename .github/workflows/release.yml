@@ -33,14 +33,14 @@ jobs:
             --flash_mode qio \
             --flash_size 16MB \
             --flash_freq 80m \
-            -o "mimiclaw-full-${VERSION}.bin" \
+            -o "MimiClaw_AMOLED-full-${VERSION}.bin" \
             0x0     build/bootloader/bootloader.bin \
             0x8000  build/partition_table/partition-table.bin \
             0xf000  build/ota_data_initial.bin \
-            0x20000 build/mimiclaw.bin
+            0x20000 build/MimiClaw_AMOLED.bin
 
           # Copy individual binaries with version suffix
-          cp build/mimiclaw.bin              "mimiclaw-${VERSION}.bin"
+          cp build/MimiClaw_AMOLED.bin              "MimiClaw_AMOLED-${VERSION}.bin"
           cp build/bootloader/bootloader.bin "bootloader-${VERSION}.bin"
           cp build/partition_table/partition-table.bin "partition-table-${VERSION}.bin"
           cp build/ota_data_initial.bin      "ota_data_initial-${VERSION}.bin"
@@ -54,10 +54,10 @@ jobs:
 
             ### 1. Merged firmware (easiest)
 
-            Download `mimiclaw-full-${{ github.ref_name }}.bin` and flash with a single command:
+            Download `MimiClaw_AMOLED-full-${{ github.ref_name }}.bin` and flash with a single command:
 
             ```bash
-            esptool.py --chip esp32s3 -b 460800 write_flash 0x0 mimiclaw-full-${{ github.ref_name }}.bin
+            esptool.py --chip esp32s3 -b 460800 write_flash 0x0 MimiClaw_AMOLED-full-${{ github.ref_name }}.bin
             ```
 
             ### 2. Individual binaries (advanced)
@@ -67,12 +67,12 @@ jobs:
               0x0     bootloader-${{ github.ref_name }}.bin \
               0x8000  partition-table-${{ github.ref_name }}.bin \
               0xf000  ota_data_initial-${{ github.ref_name }}.bin \
-              0x20000 mimiclaw-${{ github.ref_name }}.bin
+              0x20000 MimiClaw_AMOLED-${{ github.ref_name }}.bin
             ```
 
             ### 3. OTA update (for devices already running MimiClaw)
 
-            Upload `mimiclaw-${{ github.ref_name }}.bin` via the OTA endpoint.
+            Upload `MimiClaw_AMOLED-${{ github.ref_name }}.bin` via the OTA endpoint.
 
             ### 4. First-time setup
 
@@ -80,13 +80,11 @@ jobs:
 
             ```
             wifi <ssid> <password>
-            tg_token <your-telegram-bot-token>
-            api_key <your-anthropic-api-key>
             reboot
             ```
           files: |
-            mimiclaw-full-${{ github.ref_name }}.bin
-            mimiclaw-${{ github.ref_name }}.bin
+            MimiClaw_AMOLED-full-${{ github.ref_name }}.bin
+            MimiClaw_AMOLED-${{ github.ref_name }}.bin
             bootloader-${{ github.ref_name }}.bin
             partition-table-${{ github.ref_name }}.bin
             ota_data_initial-${{ github.ref_name }}.bin

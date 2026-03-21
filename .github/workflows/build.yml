@@ -10,7 +10,7 @@ jobs:
   idf-build:
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:v5.5.2
+      image: espressif/idf:v5.3.2
 
     steps:
       - name: Checkout
@@ -21,5 +21,4 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           idf.py set-target esp32s3
-          idf.py fullclean
           idf.py build
