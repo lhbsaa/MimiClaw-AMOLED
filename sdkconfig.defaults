@@ -48,3 +48,6 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
 # ESP Timer - Increase task stack for battery/ADC operations
 CONFIG_ESP_TIMER_TASK_STACK_SIZE=8192
+
+# FreeRTOS Timer Task - Fix stack overflow
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096

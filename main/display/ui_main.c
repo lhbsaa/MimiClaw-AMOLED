@@ -22,6 +22,22 @@
 static const char *TAG = "ui_main";
 
 // ============================================================================
+// 快捷菜单定义
+// ============================================================================
+static void menu_action_ask_ai(void);
+static void menu_action_system_info(void);
+static void menu_action_clear_logs(void);
+static void menu_action_restart(void);
+
+static const menu_item_t s_quick_menu_items[] = {
+    {"Ask AI",      "?", menu_action_ask_ai},
+    {"System Info", "S", menu_action_system_info},
+    {"Clear Logs",  "C", menu_action_clear_logs},
+    {"Restart",     "R", menu_action_restart},
+};
+#define QUICK_MENU_COUNT (sizeof(s_quick_menu_items) / sizeof(s_quick_menu_items[0]))
+
+// ============================================================================
 // 页面定义
 // ============================================================================
 typedef enum {
@@ -30,6 +46,7 @@ typedef enum {
     PAGE_SYSTEM_MSG,    // 页面 3: 系统消息
     PAGE_MESSAGE,       // 页面 4: 消息气泡
     PAGE_LOG,           // 页面 5: 日志
+    PAGE_QUICK_MENU,    // 页面 6: 快捷菜单
     PAGE_COUNT
 } ui_page_t;
 
@@ -64,6 +81,17 @@ static int s_nav_index = 0;
 static bool s_nav_initialized = false;
 static bool s_splash_done = false;  // 启动画面是否结束
 
+// 快捷菜单状态
+static bool s_menu_active = false;
+static int s_menu_index = 0;
+
+// AOD 模式状态
+static bool s_aod_mode = false;
+
+// AI 动画状态
+static bool s_ai_busy = false;
+static int s_anim_frame = 0;
+
 // 启动页面定时器
 static esp_timer_handle_t s_splash_timer = NULL;
 
@@ -91,10 +119,13 @@ static int s_msg_count = 0;
 static void update_status_bar(void);
 static void on_single_click(void);
 static void on_double_click(void);
+static void on_triple_click(void);
 static void on_long_press(void);
 static void on_very_long_press(void);
 static void splash_timer_callback(void *arg);
 static void ui_show_page(ui_page_t page);
+static void ui_show_quick_menu(void);
+static void ui_hide_quick_menu(void);
 
 // ============================================================================
 // 页面切换
@@ -120,7 +151,7 @@ static void ui_show_page(ui_page_t page)
     
     switch (page) {
         case PAGE_STATUS_BAR:
-            // Home页面 - 时间、日期、问候语、AI状态
+            // Home页面 - 紧凑布局，信息丰富
             gui_draw_hline(12, SCREEN_WIDTH - 12, 45, COLOR_DARK_GRAY);
             {
                 // 获取日期信息
@@ -132,10 +163,10 @@ static void ui_show_page(ui_page_t page)
                     struct tm tm_info;
                     localtime_r(&now, &tm_info);
                     
-                    // 格式化日期
+                    // 格式化日期（简化格式）
                     const char *weekdays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-                    snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d %s", 
-                             tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                    snprintf(date_str, sizeof(date_str), "%02d/%02d %s", 
+                             tm_info.tm_mon + 1, tm_info.tm_mday,
                              weekdays[tm_info.tm_wday]);
                     
                     // 根据时间段生成问候语
@@ -150,12 +181,14 @@ static void ui_show_page(ui_page_t page)
                         strcpy(greeting, "Good Night!");
                     }
                 } else {
-                    strcpy(date_str, "----/--/-- ---");
+                    strcpy(date_str, "--/-- ---");
                     strcpy(greeting, "Hello!");
                 }
                 
                 uint8_t bat_pct = battery_adc_is_ready() ? battery_get_percent() : 0;
-                gui_show_home_page(current_time, date_str, greeting, false, bat_pct);
+                // 使用增强版紧凑布局
+                gui_show_home_page_v2(current_time, date_str, greeting, false, bat_pct,
+                                       wifi_connected, telegram_connected, s_msg_count);
             }
             break;
             
@@ -258,6 +291,49 @@ void ui_set_time(const char *time_str)
     }
     ESP_LOGI(TAG, "Time: %s", current_time);
     update_status_bar();
+}
+
+void ui_set_ai_busy(bool busy)
+{
+    s_ai_busy = busy;
+    if (busy) {
+        s_anim_frame = 0;
+    }
+    ESP_LOGI(TAG, "AI busy: %s", busy ? "yes" : "no");
+}
+
+bool ui_is_ai_busy(void)
+{
+    return s_ai_busy;
+}
+
+int ui_get_message_count(void)
+{
+    return s_msg_count;
+}
+
+// ============================================================================
+// AOD 常亮显示模式
+// ============================================================================
+void ui_aod_enable(void)
+{
+    s_aod_mode = true;
+    gui_aod_enable();
+    display_manager_set_brightness(50);  // 降低亮度省电
+    ESP_LOGI(TAG, "AOD mode enabled");
+}
+
+void ui_aod_disable(void)
+{
+    s_aod_mode = false;
+    gui_aod_disable();
+    display_manager_set_brightness(175);  // 恢复亮度
+    ESP_LOGI(TAG, "AOD mode disabled");
+}
+
+bool ui_aod_is_enabled(void)
+{
+    return s_aod_mode;
 }
 
 void ui_add_message(const char *sender, const char *msg, bool is_me)
@@ -397,14 +473,85 @@ void ui_clear_messages(void)
 }
 
 // ============================================================================
-// 按键回调
+// 快捷菜单回调
+// ============================================================================
+static void menu_action_ask_ai(void)
+{
+    ESP_LOGI(TAG, "Menu: Ask AI");
+    ui_hide_quick_menu();
+    // 切换到消息页面，准备输入
+    s_current_page = PAGE_MESSAGE;
+    ui_show_page(PAGE_MESSAGE);
+    gui_add_log("SYS", "Ready for AI input");
+}
+
+static void menu_action_system_info(void)
+{
+    ESP_LOGI(TAG, "Menu: System Info");
+    ui_hide_quick_menu();
+    s_current_page = PAGE_SYSTEM_MSG;
+    ui_show_page(PAGE_SYSTEM_MSG);
+}
+
+static void menu_action_clear_logs(void)
+{
+    ESP_LOGI(TAG, "Menu: Clear Logs");
+    gui_clear_log();
+    ui_hide_quick_menu();
+    s_current_page = PAGE_LOG;
+    ui_show_page(PAGE_LOG);
+}
+
+static void menu_action_restart(void)
+{
+    ESP_LOGI(TAG, "Menu: Restart");
+    gui_clear_screen(COLOR_BLACK);
+    gui_draw_string(180, 100, "Restarting...", COLOR_RED, 3);
+    gui_flush();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+}
+
+// ============================================================================
+// 快捷菜单显示/隐藏
+// ============================================================================
+static void ui_show_quick_menu(void)
+{
+    s_menu_active = true;
+    s_menu_index = 0;
+    
+    // 绘制快捷菜单
+    gui_clear_screen(COLOR_BLACK);
+    gui_show_status_bar(current_time[0] ? current_time : "--:--", 
+                        wifi_connected, telegram_connected, battery_level, "Menu");
+    gui_show_quick_menu(s_quick_menu_items, QUICK_MENU_COUNT, s_menu_index);
+    gui_flush();
+}
+
+static void ui_hide_quick_menu(void)
+{
+    s_menu_active = false;
+    s_current_page = PAGE_STATUS_BAR;
+    ui_show_page(PAGE_STATUS_BAR);
+}
+
+// ============================================================================
+// 按键回调 - 上下文相关行为
 // ============================================================================
 static void on_single_click(void)
 {
-    ESP_LOGI(TAG, "Single click - next page");
+    ESP_LOGI(TAG, "Single click");
     
     // 唤醒屏幕
     display_manager_wakeup();
+    
+    // 如果菜单激活，选择下一项
+    if (s_menu_active) {
+        s_menu_index = (s_menu_index + 1) % QUICK_MENU_COUNT;
+        gui_show_quick_menu(s_quick_menu_items, QUICK_MENU_COUNT, s_menu_index);
+        gui_flush();
+        return;
+    }
     
     // 如果还在启动页面，先切换到状态栏页面
     if (!s_nav_initialized) {
@@ -422,29 +569,92 @@ static void on_single_click(void)
         return;
     }
     
-    ui_next_page();
+    // 上下文相关：根据当前页面执行不同操作
+    switch (s_current_page) {
+        case PAGE_STATUS_BAR:
+            // Home 页面：切换到下一页
+            ui_next_page();
+            break;
+            
+        case PAGE_MESSAGE:
+            // 消息页面：向下滚动
+            message_y_pos += 40;
+            if (message_y_pos > SCREEN_HEIGHT - 50) {
+                message_y_pos = 50;
+            }
+            ui_show_page(PAGE_MESSAGE);
+            break;
+            
+        case PAGE_LOG:
+            // 日志页面：向下滚动
+            ui_show_page(PAGE_LOG);
+            break;
+            
+        default:
+            ui_next_page();
+            break;
+    }
 }
 
 static void on_double_click(void)
 {
-    ESP_LOGI(TAG, "Double click - next page");
+    ESP_LOGI(TAG, "Double click - Quick Ask AI");
     display_manager_wakeup();
-    ui_next_page();
+    
+    // 如果菜单激活，确认选择
+    if (s_menu_active) {
+        if (s_quick_menu_items[s_menu_index].action) {
+            s_quick_menu_items[s_menu_index].action();
+        }
+        return;
+    }
+    
+    // 快捷操作：切换到消息页面准备输入
+    if (s_nav_initialized) {
+        s_current_page = PAGE_MESSAGE;
+        ui_show_page(PAGE_MESSAGE);
+        gui_add_log("SYS", "Ready for AI input");
+    }
+}
+
+static void on_triple_click(void)
+{
+    ESP_LOGI(TAG, "Triple click - Go Home");
+    display_manager_wakeup();
+    
+    // 如果菜单激活，取消菜单
+    if (s_menu_active) {
+        ui_hide_quick_menu();
+        return;
+    }
+    
+    // 返回首页
+    if (s_nav_initialized) {
+        s_current_page = PAGE_STATUS_BAR;
+        s_nav_index = 0;
+        ui_show_page(PAGE_STATUS_BAR);
+    }
 }
 
 static void on_long_press(void)
 {
-    ESP_LOGI(TAG, "Long press - restart");
+    ESP_LOGI(TAG, "Long press - Show menu");
+    display_manager_wakeup();
+    
+    // 显示快捷菜单
+    if (s_nav_initialized && !s_menu_active) {
+        ui_show_quick_menu();
+    }
+}
+
+static void on_very_long_press(void)
+{
+    ESP_LOGI(TAG, "Very long press - Restart");
     gui_clear_screen(COLOR_BLACK);
     gui_draw_string(180, 100, "Restarting...", COLOR_RED, 3);
     gui_flush();
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
-}
-
-static void on_very_long_press(void)
-{
-    ESP_LOGI(TAG, "Very long press - factory reset (not implemented)");
 }
 
 // ============================================================================
@@ -499,50 +709,76 @@ static void status_update_task(void *arg)
 {
     (void)arg;
     int battery_counter = 0;
+    int time_counter = 0;
     bool splash_switched = false;  // 确保只切换一次
     
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));  // 每秒检查一次
+        vTaskDelay(pdMS_TO_TICKS(500));  // 500ms 间隔，支持流畅动画
         
-        // 检查是否需要切换启动页面（在任务上下文中执行，有足够栈空间）
-        if (s_splash_done && !splash_switched && s_current_page == PAGE_BOOT) {
-            splash_switched = true;
-            s_nav_initialized = true;
-            s_current_page = PAGE_STATUS_BAR;
-            s_nav_index = 0;
-            ui_show_page(PAGE_STATUS_BAR);
+        // AOD 模式更新（每秒更新一次时间显示）
+        if (s_aod_mode && gui_aod_is_enabled()) {
+            static int aod_counter = 0;
+            aod_counter++;
+            if (aod_counter >= 2) {  // 每秒更新
+                aod_counter = 0;
+                gui_aod_update(current_time, battery_level, wifi_connected);
+                gui_flush();
+            }
+            continue;  // AOD 模式下跳过其他更新
+        }
+        
+        // AI 思考动画更新
+        if (s_ai_busy && s_splash_done && s_current_page == PAGE_STATUS_BAR) {
+            s_anim_frame++;
+            gui_show_ai_status_area(true, s_anim_frame);
+            gui_flush();
+        }
+        
+        // 时间更新（每秒）
+        time_counter++;
+        if (time_counter >= 2) {
+            time_counter = 0;
             
-            // 显示启动期间缓存的消息
-            for (int i = 0; i < s_pending_count; i++) {
-                gui_add_log("SYS", s_pending_msgs[i]);
+            // 检查是否需要切换启动页面（在任务上下文中执行，有足够栈空间）
+            if (s_splash_done && !splash_switched && s_current_page == PAGE_BOOT) {
+                splash_switched = true;
+                s_nav_initialized = true;
+                s_current_page = PAGE_STATUS_BAR;
+                s_nav_index = 0;
+                ui_show_page(PAGE_STATUS_BAR);
+                
+                // 显示启动期间缓存的消息
+                for (int i = 0; i < s_pending_count; i++) {
+                    gui_add_log("SYS", s_pending_msgs[i]);
+                }
+                s_pending_count = 0;
+                continue;  // 跳过本次循环
             }
-            s_pending_count = 0;
-            continue;  // 跳过本次循环，下一秒再更新状态栏
-        }
-        
-        // 获取系统时间
-        time_t now = time(NULL);
-        if (now > 1700000000) {  // 时间已同步
-            struct tm tm_info;
-            localtime_r(&now, &tm_info);
-            snprintf(current_time, sizeof(current_time), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
-        } else {
-            strncpy(current_time, "--:--", sizeof(current_time) - 1);
-        }
-        
-        // 每10秒更新电池电量
-        battery_counter++;
-        if (battery_counter >= 10) {
-            battery_counter = 0;
-            if (battery_adc_is_ready()) {
-                int pct = battery_get_percent();
-                battery_level = (uint8_t)pct;  // 静默更新，不输出日志
+            
+            // 获取系统时间
+            time_t now = time(NULL);
+            if (now > 1700000000) {  // 时间已同步
+                struct tm tm_info;
+                localtime_r(&now, &tm_info);
+                snprintf(current_time, sizeof(current_time), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
+            } else {
+                strncpy(current_time, "--:--", sizeof(current_time) - 1);
             }
-        }
-        
-        // 更新状态栏
-        if (s_splash_done && s_current_page != PAGE_BOOT) {
-            update_status_bar();
+            
+            // 每10秒更新电池电量
+            battery_counter++;
+            if (battery_counter >= 10) {
+                battery_counter = 0;
+                if (battery_adc_is_ready()) {
+                    int pct = battery_get_percent();
+                    battery_level = (uint8_t)pct;  // 静默更新，不输出日志
+                }
+            }
+            
+            // 更新状态栏（非 AI 忙碌时）
+            if (s_splash_done && s_current_page != PAGE_BOOT && !s_ai_busy) {
+                update_status_bar();
+            }
         }
     }
 }
@@ -590,6 +826,7 @@ esp_err_t ui_main_init(void)
         // 注册按键回调
         boot_button_register_callback(BOOT_BTN_SINGLE_CLICK, on_single_click);
         boot_button_register_callback(BOOT_BTN_DOUBLE_CLICK, on_double_click);
+        boot_button_register_callback(BOOT_BTN_TRIPLE_CLICK, on_triple_click);
         boot_button_register_callback(BOOT_BTN_LONG_PRESS, on_long_press);
         boot_button_register_callback(BOOT_BTN_VERY_LONG_PRESS, on_very_long_press);
     }

@@ -17,6 +17,13 @@ void ui_set_telegram_status(bool connected);
 void ui_set_battery_level(uint8_t percentage);
 void ui_set_time(const char *time_str);
 
+// AI 状态
+void ui_set_ai_busy(bool busy);
+bool ui_is_ai_busy(void);
+
+// 消息计数
+int ui_get_message_count(void);
+
 // 兼容性函数（旧代码使用）
 void ui_update_wifi_status(bool connected);
 void ui_update_telegram_status(bool connected);
@@ -39,6 +46,11 @@ void ui_show_keyboard(bool show);
 // 屏幕导航
 void ui_show_main_screen(void);
 void ui_show_settings_screen(void);
+
+// AOD 常亮显示模式
+void ui_aod_enable(void);
+void ui_aod_disable(void);
+bool ui_aod_is_enabled(void);
 
 #ifdef __cplusplus
 }

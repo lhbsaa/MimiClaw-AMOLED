@@ -283,6 +283,637 @@ static const uint8_t font5x7[][5] = {
     {0x44,0x64,0x54,0x4C,0x44}, /* z */
 };
 
+// ============================================================================
+// 16x16 Emoji 位图 (每个 emoji 32 字节, 16 行 x 16 位)
+// 使用 scale 参数放大显示: scale=1 为 16x16, scale=2 为 32x32
+// ============================================================================
+#define EMOJI_SIZE  16
+#define EMOJI_ROW_BYTES  2  // 每行 16 位 = 2 字节
+
+// Emoji 颜色定义 - 提高对比度
+static const uint16_t emoji_colors[] = {
+    [EMOJI_OK]          = 0x07E0,      // ✓ 亮绿色 (0,255,0)
+    [EMOJI_FAIL]        = 0xF800,      // ✗ 亮红色 (255,0,0)
+    [EMOJI_WARN]        = 0xFFE0,      // ⚠ 亮黄色 (255,255,0)
+    [EMOJI_INFO]        = 0x07FF,      // ℹ 亮青色 (0,255,255)
+    [EMOJI_QUESTION]    = 0xFFFF,      // ? 亮白色
+    [EMOJI_BATTERY]     = 0x07E0,      // 🔋 亮绿色
+    [EMOJI_BATTERY_LOW] = 0xF800,      // 🔋 亮红色
+    [EMOJI_WIFI]        = 0x07E0,      // 📶 亮绿色
+    [EMOJI_WIFI_OFF]    = 0x7BEF,      // 📶 中灰
+    [EMOJI_ROBOT]       = 0x07FF,      // 🤖 亮青色
+    [EMOJI_BRAIN]       = 0xF81F,      // 🧠 亮粉色
+    [EMOJI_LIGHT]       = 0xFFE0,      // 💡 亮黄色
+    [EMOJI_SPARK]       = 0xFFE0,      // ⚡ 亮黄色
+    [EMOJI_MSG]         = 0x07FF,      // 📨 亮青色
+    [EMOJI_CHAT]        = 0x07E0,      // 💬 亮绿色
+    [EMOJI_SEND]        = 0x07FF,      // 📤 亮青色
+    [EMOJI_SMILE]       = 0xFFE0,      // 😊 亮黄色
+    [EMOJI_SLEEP]       = 0x87FF,      // 😴 浅蓝
+    [EMOJI_THINK]       = 0xFFE0,      // 🤔 亮黄色
+    [EMOJI_CLOCK]       = 0xFFFF,      // 🕐 亮白色
+    [EMOJI_SUN]         = 0xFFE0,      // ☀ 亮黄色
+    [EMOJI_MOON]        = 0xFFE0,      // 🌙 亮黄色
+    [EMOJI_HOME]        = 0x07FF,      // 🏠 亮青色
+    [EMOJI_SETTINGS]    = 0xB5B6,      // ⚙ 亮灰色
+    [EMOJI_SEARCH]      = 0xFFFF,      // 🔍 亮白色
+    [EMOJI_RESTART]     = 0x07E0,      // 🔄 亮绿色
+};
+
+// Emoji 位图数据 (16x16, 每行 2 字节, 16 行 = 32 字节/emoji)
+// 位为 1 表示绘制，位为 0 表示透明
+// 使用 scale=2 可放大到 32x32 像素
+static const uint8_t emoji_bitmaps[][EMOJI_SIZE * EMOJI_ROW_BYTES] = {
+    // EMOJI_NONE - 空
+    [EMOJI_NONE] = {0},
+    
+    // EMOJI_OK - ✓ 勾号
+    [EMOJI_OK] = {
+        0x00,0x00,  // 
+        0x00,0x40,  //        •
+        0x00,0x20,  //       •
+        0x00,0x10,  //      •
+        0x00,0x08,  //     •
+        0x00,0x04,  //    •
+        0x80,0x04,  // •  •
+        0x40,0x08,  //  •    •
+        0x20,0x10,  //   •  •
+        0x10,0x20,  //    ••
+        0x08,0x40,  //   • •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_FAIL - ✗ 叉号
+    [EMOJI_FAIL] = {
+        0x00,0x00,  // 
+        0x20,0x08,  //   •       •
+        0x10,0x10,  //    •     •
+        0x08,0x20,  //     •   •
+        0x04,0x40,  //      • •
+        0x02,0x80,  //       •
+        0x01,0x00,  //        •
+        0x02,0x80,  //       • •
+        0x04,0x40,  //      • •
+        0x08,0x20,  //     •   •
+        0x10,0x10,  //    •     •
+        0x20,0x08,  //   •       •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_WARN - ⚠ 警告三角
+    [EMOJI_WARN] = {
+        0x00,0x00,  // 
+        0x00,0x80,  //        •
+        0x01,0xC0,  //       •••
+        0x03,0xE0,  //      ••••
+        0x03,0xE0,  //      ••••
+        0x06,0x30,  //     ••  ••
+        0x06,0x30,  //     ••  ••
+        0x0C,0x18,  //    ••    ••
+        0x0C,0x18,  //    ••    ••
+        0x1F,0xF8,  //   •••••••••
+        0x18,0x18,  //   ••    ••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_INFO - ℹ 信息圆圈
+    [EMOJI_INFO] = {
+        0x03,0xC0,  //      ••••
+        0x07,0xE0,  //     ••••••
+        0x0E,0x70,  //    •••   •••
+        0x1C,0x38,  //   •••     •••
+        0x18,0x18,  //   ••       ••
+        0x18,0xD8,  //   ••  ••   ••
+        0x18,0x18,  //   ••       ••
+        0x18,0x18,  //   ••       ••
+        0x18,0x18,  //   ••       ••
+        0x1C,0x38,  //   •••     •••
+        0x0E,0x70,  //    •••   •••
+        0x07,0xE0,  //     ••••••
+        0x03,0xC0,  //      ••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_QUESTION - ? 问号
+    [EMOJI_QUESTION] = {
+        0x07,0xE0,  //     ••••••
+        0x1F,0xF8,  //   •••••••••
+        0x3C,0x3C,  //  ••••   ••••
+        0x30,0x0C,  //  ••       ••
+        0x00,0x18,  //       ••
+        0x00,0x30,  //      ••
+        0x00,0x60,  //     ••
+        0x00,0xC0,  //    ••
+        0x01,0x80,  //   ••
+        0x01,0x80,  //   ••
+        0x01,0x80,  //   ••
+        0x00,0x00,  // 
+        0x01,0x80,  //   ••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_BATTERY - 🔋 电池满
+    [EMOJI_BATTERY] = {
+        0x01,0xC0,  //      •••
+        0x01,0xC0,  //      •••
+        0x3F,0xF8,  // ••••••••••
+        0x7F,0xFC,  // ••••••••••••
+        0xFF,0xFE,  // ••••••••••••••
+        0xFF,0xFE,  // ••••••••••••••
+        0xFF,0xFE,  // ••••••••••••••
+        0xFF,0xFE,  // ••••••••••••••
+        0xFF,0xFE,  // ••••••••••••••
+        0x7F,0xFC,  // ••••••••••••
+        0x3F,0xF8,  // ••••••••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_BATTERY_LOW - 🔋 电池低
+    [EMOJI_BATTERY_LOW] = {
+        0x01,0xC0,  //      •••
+        0x01,0xC0,  //      •••
+        0x3F,0xF8,  // ••••••••••
+        0x70,0x1C,  // •••       •••
+        0x60,0x0C,  // ••         ••
+        0x60,0x0C,  // ••         ••
+        0x60,0x0C,  // ••         ••
+        0x60,0x0C,  // ••         ••
+        0x70,0x1C,  // •••       •••
+        0x3F,0xF8,  // ••••••••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_WIFI - 📶 WiFi信号
+    [EMOJI_WIFI] = {
+        0x00,0x80,  //        •
+        0x01,0xC0,  //       •••
+        0x03,0xE0,  //      •••••
+        0x06,0x30,  //     ••   ••
+        0x0C,0x18,  //    ••     ••
+        0x1F,0xF8,  //   •••••••••
+        0x18,0x18,  //   ••     ••
+        0x07,0xE0,  //      •••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_WIFI_OFF - 📶 WiFi断开
+    [EMOJI_WIFI_OFF] = {
+        0x18,0x18,  //   ••       ••
+        0x0C,0x30,  //    ••     ••
+        0x06,0x60,  //     ••   ••
+        0x03,0xC0,  //      ••••
+        0x00,0x80,  //        •
+        0x01,0x80,  //       ••
+        0x07,0xE0,  //      •••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_ROBOT - 🤖 机器人
+    [EMOJI_ROBOT] = {
+        0x01,0x80,  //       ••
+        0x01,0x80,  //       ••
+        0x01,0x80,  //       ••
+        0x0F,0xF0,  //     •••••••
+        0x1E,0x78,  //    ••••   ••••
+        0x38,0x1C,  //    •••     •••
+        0x30,0x0C,  //    ••       ••
+        0xFF,0xFC,  // ••••••••••••••
+        0xC9,0x94,  // ••  •  ••  • •
+        0xC9,0x94,  // ••  •  ••  • •
+        0xFF,0xFC,  // ••••••••••••••
+        0xAA,0xAC,  // •• • • • • • ••
+        0xAA,0xAC,  // •• • • • • • ••
+        0x07,0xE0,  //      ••••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_BRAIN - 🧠 大脑
+    [EMOJI_BRAIN] = {
+        0x03,0xC0,  //      ••••
+        0x0F,0xF0,  //    •••••••
+        0x1C,0x38,  //   •••     •••
+        0x34,0x2C,  //  •• •   • ••
+        0x6A,0x56,  // •• • • • • ••
+        0x55,0xAA,  // • • • •••• •
+        0x55,0xAA,  // • • • •••• •
+        0x6A,0x56,  // •• • • • • ••
+        0x34,0x2C,  //  •• •   • ••
+        0x1C,0x38,  //   •••     •••
+        0x0F,0xF0,  //    •••••••
+        0x03,0xC0,  //      ••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_LIGHT - 💡 灯泡
+    [EMOJI_LIGHT] = {
+        0x03,0xC0,  //      ••••
+        0x0F,0xF0,  //    •••••••
+        0x1F,0xF8,  //   •••••••••
+        0x3F,0xFC,  //  •••••••••••
+        0x3F,0xFC,  //  •••••••••••
+        0x3F,0xFC,  //  •••••••••••
+        0x1F,0xF8,  //   •••••••••
+        0x0F,0xF0,  //    •••••••
+        0x07,0xE0,  //     ••••••
+        0x07,0xE0,  //     ••••••
+        0x0F,0xF0,  //    •••••••
+        0x0F,0xF0,  //    •••••••
+        0x07,0xE0,  //     ••••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SPARK - ⚡ 闪电
+    [EMOJI_SPARK] = {
+        0x00,0x80,  //        •
+        0x01,0x00,  //       •
+        0x02,0x00,  //      •
+        0x04,0x00,  //     •
+        0x08,0x00,  //    •
+        0xFF,0xFE,  // ••••••••••••••
+        0x01,0xC0,  //       •••
+        0x01,0x00,  //       •
+        0x02,0x00,  //      •
+        0x04,0x00,  //     •
+        0x08,0x00,  //    •
+        0x10,0x00,  //   •
+        0x20,0x00,  //  •
+        0x40,0x00,  // •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_MSG - 📨 信封
+    [EMOJI_MSG] = {
+        0x7F,0xF8,  // •••••••••••
+        0xC0,0x0C,  // ••         ••
+        0xE0,0x0C,  // •••        ••
+        0xD0,0x0C,  // •• •       ••
+        0xC8,0x0C,  // ••  •      ••
+        0xC4,0x0C,  // ••   •     ••
+        0xC2,0x0C,  // ••    •    ••
+        0xC1,0x0C,  // ••     •   ••
+        0x7F,0xF8,  // •••••••••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_CHAT - 💬 对话气泡
+    [EMOJI_CHAT] = {
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x03,0xF0,  //              ••••••
+        0x0F,0xFC,  //            •••••••••
+        0x1C,0x1C,  //           •••     •••
+        0x18,0x0C,  //           ••       ••
+        0x18,0x0C,  //           ••       ••
+        0x1C,0x1C,  //           •••     •••
+        0x0F,0xFC,  //            •••••••••
+        0x03,0xF0,  //              ••••••
+        0x00,0xC0,  //               •••
+        0x00,0x60,  //                ••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SEND - 📤 发送
+    [EMOJI_SEND] = {
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x08,  //                  •
+        0x00,0x10,  //                 •
+        0x00,0x20,  //                •
+        0x00,0x40,  //               •
+        0x1F,0xFF,  //      ••••••••••••••
+        0x00,0x40,  //               •
+        0x00,0x20,  //                •
+        0x1F,0xFF,  //      ••••••••••••••
+        0x00,0x20,  //                •
+        0x00,0x10,  //                 •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SMILE - 😊 笑脸
+    [EMOJI_SMILE] = {
+        0x00,0x00,  // 
+        0x01,0xC0,  //              •••
+        0x03,0xE0,  //             •••••
+        0x07,0xF0,  //            ••••••
+        0x0E,0x38,  //           •••   •••
+        0x1C,0x1C,  //          •••     •••
+        0x18,0x8C,  //          ••   •   ••
+        0x18,0x8C,  //          ••   •   ••
+        0x1C,0x1C,  //          •••     •••
+        0x0C,0x38,  //           ••    •••
+        0x07,0xE0,  //            ••••••
+        0x03,0xC0,  //             ••••
+        0x01,0x80,  //              ••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SLEEP - 😴 睡觉
+    [EMOJI_SLEEP] = {
+        0x00,0x00,  // 
+        0x01,0xC0,  //              •••
+        0x03,0xE0,  //             •••••
+        0x07,0xF0,  //            ••••••
+        0x0E,0x38,  //           •••   •••
+        0x1C,0x1C,  //          •••     •••
+        0x1D,0x9C,  //          ••• ••  •••
+        0x1D,0x9C,  //          ••• ••  •••
+        0x1C,0x1C,  //          •••     •••
+        0x0C,0x38,  //           ••    •••
+        0x07,0xE0,  //            ••••••
+        0x03,0xC0,  //             ••••
+        0x01,0x80,  //              ••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_THINK - 🤔 思考
+    [EMOJI_THINK] = {
+        0x00,0x00,  // 
+        0x01,0xC0,  //              •••
+        0x03,0xE0,  //             •••••
+        0x06,0x30,  //            •••   ••
+        0x0C,0x18,  //           ••     ••
+        0x19,0x98,  //          ••  ••  ••
+        0x19,0x98,  //          ••  ••  ••
+        0x18,0x18,  //          ••     ••
+        0x1C,0x38,  //          •••   •••
+        0x0C,0x30,  //           ••   ••
+        0x07,0xE0,  //            ••••••
+        0x03,0xC0,  //             ••••
+        0x00,0xC0,  //               •••
+        0x00,0x80,  //                •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_CLOCK - 🕐 时钟
+    [EMOJI_CLOCK] = {
+        0x00,0x00,  // 
+        0x03,0xE0,  //             •••••
+        0x07,0xF0,  //            ••••••
+        0x0E,0x38,  //           •••   •••
+        0x0C,0x18,  //           ••     ••
+        0x0C,0xF8,  //           ••  •••••
+        0x0C,0x38,  //           ••   •••
+        0x0C,0x18,  //           ••     ••
+        0x0C,0x38,  //           ••   •••
+        0x0C,0x30,  //           ••    ••
+        0x0E,0x38,  //           •••   •••
+        0x07,0xF0,  //            ••••••
+        0x03,0xE0,  //             •••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SUN - ☀ 太阳
+    [EMOJI_SUN] = {
+        0x00,0x80,  //                •
+        0x00,0x80,  //                •
+        0x08,0x88,  //         •     •    •
+        0x04,0x90,  //           •  •  •
+        0x03,0xE0,  //              •••••
+        0x07,0xF0,  //             ••••••
+        0x0F,0xF8,  //            ••••••••
+        0x07,0xF0,  //             ••••••
+        0x03,0xE0,  //              •••••
+        0x04,0x90,  //           •  •  •
+        0x08,0x88,  //         •     •    •
+        0x00,0x80,  //                •
+        0x00,0x80,  //                •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_MOON - 🌙 月亮
+    [EMOJI_MOON] = {
+        0x00,0x00,  // 
+        0x03,0xE0,  //             •••••
+        0x07,0xF0,  //            ••••••
+        0x0C,0x38,  //           •••   •••
+        0x18,0x18,  //          ••      ••
+        0x18,0x08,  //          ••        •
+        0x18,0x08,  //          ••        •
+        0x18,0x08,  //          ••        •
+        0x18,0x18,  //          ••      ••
+        0x0C,0x10,  //           ••      •
+        0x06,0x20,  //            ••    •
+        0x03,0xC0,  //             ••••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_HOME - 🏠 首页
+    [EMOJI_HOME] = {
+        0x00,0x00,  // 
+        0x00,0x80,  //                •
+        0x01,0xC0,  //               •••
+        0x03,0xE0,  //              •••••
+        0x07,0xF0,  //             ••••••
+        0x0F,0xF8,  //            ••••••••
+        0x1F,0xFC,  //           •••••••••
+        0x1E,0x3C,  //           ••••   ••••
+        0x1C,0x1C,  //           •••     •••
+        0x1C,0x1C,  //           •••     •••
+        0x1C,0x1C,  //           •••     •••
+        0x1C,0x1C,  //           •••     •••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SETTINGS - ⚙ 设置
+    [EMOJI_SETTINGS] = {
+        0x00,0x00,  // 
+        0x04,0x10,  //           •      •
+        0x04,0x10,  //           •      •
+        0x02,0x20,  //            •    •
+        0x08,0x88,  //         •    •    •
+        0x1F,0xF8,  //          •••••••••
+        0x0E,0x70,  //            ••• •••
+        0x04,0x20,  //             •  •
+        0x0E,0x70,  //            ••• •••
+        0x1F,0xF8,  //          •••••••••
+        0x08,0x88,  //         •    •    •
+        0x02,0x20,  //            •    •
+        0x04,0x10,  //           •      •
+        0x04,0x10,  //           •      •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_SEARCH - 🔍 搜索
+    [EMOJI_SEARCH] = {
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x01,0xC0,  //               •••
+        0x03,0xE0,  //              •••••
+        0x06,0x30,  //             •••   ••
+        0x0C,0x18,  //            ••     ••
+        0x0C,0x18,  //            ••     ••
+        0x0C,0x18,  //            ••     ••
+        0x06,0x30,  //             ••   ••
+        0x03,0xE0,  //              •••••
+        0x01,0xC0,  //               •••
+        0x00,0x80,  //                •
+        0x01,0x00,  //               •
+        0x02,0x00,  //              •
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+    
+    // EMOJI_RESTART - 🔄 重启
+    [EMOJI_RESTART] = {
+        0x00,0x00,  // 
+        0x01,0xC0,  //               •••
+        0x03,0xE0,  //              •••••
+        0x07,0x00,  //             •••
+        0x0C,0x00,  //            ••
+        0x18,0x0C,  //           ••        ••
+        0x10,0x04,  //           •          •
+        0x00,0x1C,  //                •••
+        0x00,0x38,  //               •••
+        0x00,0x60,  //              ••
+        0x01,0xC0,  //               •••
+        0x03,0x80,  //              •••
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+        0x00,0x00,  // 
+    },
+};
+
+// 绘制单个 emoji (16x16 像素, 每行 2 字节, 支持 scale 缩放)
+void gui_draw_emoji(int16_t x, int16_t y, emoji_id_t emoji, uint8_t scale)
+{
+    if (emoji <= EMOJI_NONE || emoji >= EMOJI_COUNT) return;
+    
+    const uint8_t *bitmap = emoji_bitmaps[emoji];
+    uint16_t color = emoji_colors[emoji];
+    
+    for (int row = 0; row < EMOJI_SIZE; row++) {
+        // 读取 16 位行数据 (2 字节)
+        uint16_t row_data = ((uint16_t)bitmap[row * 2] << 8) | bitmap[row * 2 + 1];
+        for (int col = 0; col < EMOJI_SIZE; col++) {
+            if (row_data & (0x8000 >> col)) {
+                if (scale <= 1) {
+                    fb_set_pixel(x + col, y + row, color);
+                } else {
+                    fb_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+                }
+            }
+        }
+    }
+}
+
+// 前向声明
+static void fb_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint8_t scale);
+
+// 获取 emoji 宽度
+int16_t gui_emoji_width(uint8_t scale)
+{
+    return EMOJI_SIZE * scale;
+}
+
+// 绘制带 emoji 的字符串
+// 格式: "\x01\xNN" 其中 NN 是 emoji ID (十进制或十六进制)
+void gui_draw_string_with_emoji(int16_t x, int16_t y, const char *str, 
+                                 uint16_t color, uint8_t scale)
+{
+    if (!str) return;
+    
+    uint16_t ox = x;
+    int char_w = 6 * scale;
+    int emoji_w = EMOJI_SIZE * scale;
+    int line_h = 8 * scale > EMOJI_SIZE * scale ? 8 * scale : EMOJI_SIZE * scale;
+    
+    while (*str) {
+        if (*str == '\n') {
+            x = ox;
+            y += line_h + 2;
+            str++;
+        } else if (*str == 0x01 && *(str + 1) != '\0') {
+            // Emoji 编码: \x01\xNN
+            str++;
+            emoji_id_t emoji = (emoji_id_t)(uint8_t)*str;
+            gui_draw_emoji(x, y, emoji, scale);
+            x += emoji_w + 2 * scale;  // emoji 后加一点间距
+            str++;
+        } else {
+            fb_draw_char(x, y, *str, color, scale);
+            x += char_w;
+            str++;
+        }
+        
+        if (x > SCREEN_WIDTH - char_w) {
+            x = ox;
+            y += line_h + 2;
+        }
+        if (y + line_h > SCREEN_HEIGHT) break;
+    }
+}
+
 static void fb_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint8_t scale)
 {
     if (c < 32 || c > 122) c = '?';
@@ -935,4 +1566,360 @@ void gui_show_log(void)
 void gui_clear_log(void)
 {
     s_log_count = 0;
+}
+
+// ============================================================================
+// 快捷菜单系统
+// ============================================================================
+
+void gui_show_quick_menu(const menu_item_t *items, int count, int selected)
+{
+    if (!items || count <= 0) return;
+    
+    // 菜单区域 - 屏幕中央
+    int16_t menu_w = 320;
+    int16_t menu_h = count * 44 + 70;  // 每项44像素 + 标题区 (适应 32x32 emoji)
+    int16_t menu_x = (SCREEN_WIDTH - menu_w) / 2;
+    int16_t menu_y = (SCREEN_HEIGHT - menu_h) / 2;
+    if (menu_y < 40) menu_y = 45;
+    
+    // 绘制菜单背景
+    fb_fill_rect(menu_x - 5, menu_y - 5, menu_w + 10, menu_h + 10, C_DGRAY);
+    fb_fill_rect(menu_x, menu_y, menu_w, menu_h, rgb565(30, 30, 35));
+    fb_draw_rect(menu_x, menu_y, menu_w, menu_h, rgb565(80, 80, 85));
+    
+    // 标题
+    fb_draw_string(menu_x + 15, menu_y + 10, "Quick Menu", C_CYAN, 2);
+    fb_draw_hline(menu_x + 10, menu_x + menu_w - 10, menu_y + 38, C_DGRAY);
+    
+    // 菜单项
+    int16_t item_y = menu_y + 50;
+    for (int i = 0; i < count && item_y < menu_y + menu_h - 20; i++) {
+        uint16_t text_color = (i == selected) ? C_WHITE : C_LGRAY;
+        
+        // 选中项高亮背景
+        if (i == selected) {
+            fb_fill_rect(menu_x + 8, item_y - 4, menu_w - 16, 40, rgb565(50, 50, 55));
+        }
+        
+        // 根据 label 选择 emoji
+        emoji_id_t emoji = EMOJI_NONE;
+        if (strstr(items[i].label, "Ask") || strstr(items[i].label, "AI")) {
+            emoji = EMOJI_ROBOT;
+        } else if (strstr(items[i].label, "System") || strstr(items[i].label, "Info")) {
+            emoji = EMOJI_INFO;
+        } else if (strstr(items[i].label, "Clear") || strstr(items[i].label, "Log")) {
+            emoji = EMOJI_CHAT;
+        } else if (strstr(items[i].label, "Restart") || strstr(items[i].label, "Reset")) {
+            emoji = EMOJI_RESTART;
+        } else if (strstr(items[i].label, "Search")) {
+            emoji = EMOJI_SEARCH;
+        } else if (strstr(items[i].label, "Settings") || strstr(items[i].label, "Setting")) {
+            emoji = EMOJI_SETTINGS;
+        } else if (strstr(items[i].label, "Home")) {
+            emoji = EMOJI_HOME;
+        } else if (items[i].icon && items[i].icon[0] == 0x01 && items[i].icon[1] != '\0') {
+            // 支持 \x01\xNN 格式的 emoji ID
+            emoji = (emoji_id_t)(uint8_t)items[i].icon[1];
+        }
+        
+        // 绘制 16x16 emoji 放大到 32x32
+        int16_t text_x = menu_x + 20;
+        if (emoji != EMOJI_NONE) {
+            gui_draw_emoji(text_x, item_y, emoji, 2);  // 16x16 -> 32x32
+            text_x += 38;  // emoji 后留出间距
+        } else if (items[i].icon && items[i].icon[0]) {
+            // 使用原始 ASCII 图标
+            char icon_buf[4] = {items[i].icon[0], ' ', '\0'};
+            fb_draw_string(text_x, item_y + 4, icon_buf, text_color, 2);
+            text_x += 16;
+        }
+        
+        // 绘制菜单项文字 (与 emoji 垂直居中对齐)
+        fb_draw_string(text_x, item_y + 8, items[i].label, text_color, 2);
+        item_y += 44;
+    }
+    
+    // 底部提示
+    fb_draw_string(menu_x + 20, menu_y + menu_h - 20, "BOOT:Next  Long:Select", C_DGRAY, 1);
+}
+
+// ============================================================================
+// AOD 常亮显示模式
+// ============================================================================
+
+static struct {
+    bool enabled;
+    int16_t offset_x;
+    int16_t offset_y;
+    uint32_t last_shift;
+} s_aod_state = {0};
+
+void gui_aod_enable(void)
+{
+    s_aod_state.enabled = true;
+    s_aod_state.offset_x = 0;
+    s_aod_state.offset_y = 0;
+    s_aod_state.last_shift = 0;
+}
+
+void gui_aod_disable(void)
+{
+    s_aod_state.enabled = false;
+}
+
+bool gui_aod_is_enabled(void)
+{
+    return s_aod_state.enabled;
+}
+
+void gui_aod_update(const char *time_str, uint8_t battery_pct, bool wifi_ok)
+{
+    if (!s_aod_state.enabled) return;
+    
+    // 清屏
+    fb_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_BLACK);
+    
+    // 每60秒移动位置（防止烧屏）
+    s_aod_state.offset_x = (s_aod_state.offset_x + 5) % 40 - 20;
+    s_aod_state.offset_y = (s_aod_state.offset_y + 3) % 20 - 10;
+    
+    // 绘制时间（居中+偏移）
+    int16_t time_x = SCREEN_WIDTH / 2 - 48 + s_aod_state.offset_x;
+    int16_t time_y = SCREEN_HEIGHT / 2 - 20 + s_aod_state.offset_y;
+    
+    if (time_str && time_str[0]) {
+        fb_draw_string(time_x, time_y, time_str, C_WHITE, 3);
+    } else {
+        fb_draw_string(time_x, time_y, "--:--", COLOR_GRAY, 3);
+    }
+    
+    // 状态图标行
+    int16_t status_y = time_y + 35;
+    int16_t status_x = SCREEN_WIDTH / 2 - 40;
+    
+    // WiFi 图标
+    if (wifi_ok) {
+        fb_draw_string(status_x, status_y, "[W]", COLOR_GRAY, 1);
+        status_x += 30;
+    }
+    
+    // 电池图标
+    char bat_str[8];
+    snprintf(bat_str, sizeof(bat_str), "%d%%", battery_pct);
+    fb_draw_string(status_x, status_y, bat_str, COLOR_GRAY, 1);
+}
+
+// ============================================================================
+// 按钮反馈效果
+// ============================================================================
+
+void gui_button_press_feedback(void)
+{
+    // 边框闪烁效果
+    fb_draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_WHITE);
+    gui_flush();
+    
+    // 短暂延迟
+    vTaskDelay(pdMS_TO_TICKS(30));
+    
+    // 恢复
+    fb_draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_BLACK);
+    gui_flush();
+}
+
+void gui_action_confirm_flash(void)
+{
+    // 快速闪烁确认
+    for (int i = 0; i < 2; i++) {
+        fb_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_WHITE);
+        gui_flush();
+        vTaskDelay(pdMS_TO_TICKS(20));
+        fb_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_BLACK);
+        gui_flush();
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+// ============================================================================
+// 动画效果实现
+// ============================================================================
+
+// AI 思考动画帧
+bool gui_animate_ai_thinking(int frame)
+{
+    static const char dots[] = {'|', '/', '-', '\\'};
+    char anim_char = dots[frame % 4];
+    
+    // 绘制 AI 思考指示
+    char buf[24];
+    snprintf(buf, sizeof(buf), "AI %c thinking...", anim_char);
+    
+    // 在状态栏下方显示
+    fb_fill_rect(200, 100, 180, 30, C_BLACK);
+    fb_draw_string(210, 105, buf, COLOR_YELLOW, 2);
+    
+    return true;  // 动画继续
+}
+
+// 启动画面动画
+bool gui_animate_boot_screen(int frame)
+{
+    // 简单的进度条动画
+    int16_t bar_x = 150;
+    int16_t bar_y = 180;
+    int16_t bar_w = 236;
+    int16_t bar_h = 8;
+    
+    // 清除进度条区域
+    fb_fill_rect(bar_x, bar_y, bar_w, bar_h, C_BLACK);
+    fb_draw_rect(bar_x, bar_y, bar_w, bar_h, C_DGRAY);
+    
+    // 填充进度
+    int16_t progress = (frame * 20) % bar_w;
+    fb_fill_rect(bar_x + 2, bar_y + 2, progress - 4, bar_h - 4, C_CYAN);
+    
+    return true;
+}
+
+// 消息滑入动画
+int16_t gui_animate_message_slide(int16_t target_y, int *anim_state)
+{
+    if (!anim_state) return -1;
+    
+    // 初始化动画状态
+    if (*anim_state == 0) {
+        *anim_state = SCREEN_WIDTH;  // 从右侧开始
+    }
+    
+    // 每帧移动 20 像素
+    *anim_state -= 20;
+    
+    if (*anim_state <= target_y) {
+        *anim_state = 0;
+        return -1;  // 动画结束
+    }
+    
+    return *anim_state;
+}
+
+// ============================================================================
+// 增强版页面显示
+// ============================================================================
+
+void gui_show_home_page_v2(const char *time_str, const char *date_str, 
+                            const char *greeting, bool ai_busy, uint8_t battery_pct,
+                            bool wifi_ok, bool tg_ok, int msg_count)
+{
+    char buf[32];
+    (void)wifi_ok;    // 状态栏已显示
+    (void)tg_ok;      // 状态栏已显示
+    (void)time_str;   // 状态栏已显示
+    
+    // 状态栏已包含：时间、WiFi、TG、电池%，此处不再重复绘制
+    
+    int16_t y = 50;
+    
+    // ===== 日期显示 =====
+    if (date_str && date_str[0]) {
+        int16_t date_w = strlen(date_str) * 12;
+        int16_t date_x = (SCREEN_WIDTH - date_w) / 2;
+        fb_draw_string(date_x, y, date_str, COLOR_CYAN, 2);
+    }
+    
+    // ===== 问候语区域 =====
+    y += 30;
+    if (greeting && greeting[0]) {
+        int16_t greet_w = strlen(greeting) * 18;
+        int16_t greet_x = (SCREEN_WIDTH - greet_w) / 2;
+        fb_draw_string(greet_x, y, greeting, COLOR_ORANGE, 3);
+    }
+    
+    // ===== AI 状态指示（使用 16x16 emoji 放大到 32x32）=====
+    y += 45;
+    int16_t ai_x = SCREEN_WIDTH / 2 - 90;
+    gui_draw_emoji(ai_x, y, EMOJI_ROBOT, 2);  // 16x16 -> 32x32
+    const char *ai_text = ai_busy ? "Working..." : "Ready";
+    fb_draw_string(ai_x + 38, y + 8, ai_text, ai_busy ? COLOR_YELLOW : COLOR_GREEN, 2);
+    
+    // ===== 状态摘要卡片（使用 16x16 emoji 放大到 32x32）=====
+    y += 45;
+    int16_t card_w = SCREEN_WIDTH - 20;
+    int16_t card_h = 48;  // 卡片高度适配 32x32 emoji + scale=2 文字
+    int16_t card_x = 10;
+    
+    // 卡片背景
+    fb_fill_rect(card_x, y, card_w, card_h, rgb565(25, 25, 30));
+    fb_draw_rect(card_x, y, card_w, card_h, C_DGRAY);
+    
+    // 状态项（使用 32x32 emoji + scale=2 文字）
+    int16_t item_x = card_x + 10;
+    int16_t item_y = y + 8;  // emoji Y 位置
+    
+    // 消息计数 (32x32 emoji + 数字)
+    gui_draw_emoji(item_x, item_y, EMOJI_MSG, 2);
+    snprintf(buf, sizeof(buf), "%d", msg_count);
+    fb_draw_string(item_x + 36, item_y + 10, buf, C_WHITE, 2);
+    item_x += 125;
+    
+    // 内存状态
+    gui_draw_emoji(item_x, item_y, EMOJI_BRAIN, 2);
+    fb_draw_string(item_x + 36, item_y + 10, "OK", COLOR_GREEN, 2);
+    item_x += 125;
+    
+    // AI 状态
+    gui_draw_emoji(item_x, item_y, ai_busy ? EMOJI_SPARK : EMOJI_OK, 2);
+    fb_draw_string(item_x + 36, item_y + 10, ai_busy ? "..." : "OK", 
+                   ai_busy ? COLOR_YELLOW : COLOR_GREEN, 2);
+    item_x += 125;
+    
+    // 电池状态
+    gui_draw_emoji(item_x, item_y, 
+                   battery_pct > 20 ? EMOJI_BATTERY : EMOJI_BATTERY_LOW, 2);
+    snprintf(buf, sizeof(buf), "%d%%", battery_pct);
+    fb_draw_string(item_x + 36, item_y + 10, buf, 
+                   battery_pct > 20 ? COLOR_GREEN : COLOR_RED, 2);
+    
+    // ===== 快捷入口提示 =====
+    y += card_h + 10;
+    fb_draw_string((SCREEN_WIDTH - 180) / 2, y, "Long press for menu", C_DGRAY, 1);
+    
+    // ===== 底部操作提示 =====
+    fb_draw_string(15, SCREEN_HEIGHT - 20, "BOOT:Next  2x:Ask AI  3x:Home", C_DGRAY, 1);
+}
+
+void gui_show_status_bar_v2(const char *time_str, bool wifi_ok, bool tg_ok, 
+                              uint8_t battery_pct, const char *page_title)
+{
+    // 调用原有状态栏
+    gui_show_status_bar(time_str, wifi_ok, tg_ok, battery_pct, page_title);
+}
+
+void gui_show_ai_status_area(bool busy, int anim_frame)
+{
+    // AI 状态区域（用于动画更新）
+    int16_t area_x = 150;
+    int16_t area_y = 100;
+    int16_t area_w = 236;
+    int16_t area_h = 40;
+    
+    // 清除区域
+    fb_fill_rect(area_x, area_y, area_w, area_h, C_BLACK);
+    
+    // 绘制边框
+    fb_draw_rect(area_x, area_y, area_w, area_h, C_DGRAY);
+    
+    // AI 状态文字
+    const char *status = busy ? "AI Thinking..." : "AI Ready";
+    uint16_t color = busy ? COLOR_YELLOW : COLOR_GREEN;
+    
+    int16_t text_w = strlen(status) * 12;
+    fb_draw_string(area_x + (area_w - text_w) / 2, area_y + 12, status, color, 2);
+    
+    // 动画指示器
+    if (busy && anim_frame >= 0) {
+        static const char spinner[] = {'|', '/', '-', '\\'};
+        char spin[2] = {spinner[anim_frame % 4], 0};
+        fb_draw_string(area_x + area_w - 25, area_y + 12, spin, COLOR_YELLOW, 2);
+    }
 }
