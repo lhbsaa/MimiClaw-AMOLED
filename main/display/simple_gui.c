@@ -1278,7 +1278,7 @@ void gui_show_status_bar(const char *time_str, bool wifi_connected, bool telegra
     // 显示页面标题 - 黑色，scale=3，居中
     if (page_title) {
         int16_t title_width = strlen(page_title) * 12;  // scale=2, char width=6*2
-        int16_t title_x = (SCREEN_WIDTH - title_width) / 3;
+        int16_t title_x = (SCREEN_WIDTH - title_width) / 2;
         fb_draw_string(title_x, 7, page_title, C_BLACK, 3);
     }
     
@@ -1517,7 +1517,7 @@ void gui_add_log(const char *tag, const char *message)
     
     // 添加新日志行，限制总长度防止溢出
     int tag_len = strlen(tag);
-    int max_msg_len = sizeof(s_log_lines[0]) - tag_len - 5;  // 5 = "[] " + null
+    int max_msg_len = sizeof(s_log_lines[0]) - tag_len - 4;  // 4 = "[" + "] " + null
     
     if (max_msg_len > 0) {
         snprintf(s_log_lines[s_log_count], sizeof(s_log_lines[0]), "[%s] %.*s", tag, max_msg_len, message);
@@ -1922,4 +1922,172 @@ void gui_show_ai_status_area(bool busy, int anim_frame)
         char spin[2] = {spinner[anim_frame % 4], 0};
         fb_draw_string(area_x + area_w - 25, area_y + 12, spin, COLOR_YELLOW, 2);
     }
+}
+
+// ============================================================================
+// 设置页面实现
+// ============================================================================
+
+void gui_show_settings_page(const setting_item_t *items, int count, int selected)
+{
+    if (!items || count <= 0) return;
+    
+    // 清屏
+    fb_fill_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, C_BLACK);
+    
+    // 标题
+    fb_draw_string((SCREEN_WIDTH - 144) / 2, 15, "Settings", COLOR_CYAN, 3);
+    fb_draw_hline(10, SCREEN_WIDTH - 10, 45, C_DGRAY);
+    
+    int16_t y = 55;
+    
+    // 显示设置项
+    for (int i = 0; i < count && y < SCREEN_HEIGHT - 30; i++) {
+        const setting_item_t *item = &items[i];
+        bool is_selected = (i == selected);
+        
+        // 高亮选中项
+        if (is_selected) {
+            fb_fill_rect(10, y - 2, SCREEN_WIDTH - 20, 30, rgb565(30, 30, 40));
+            fb_draw_rect(10, y - 2, SCREEN_WIDTH - 20, 30, COLOR_CYAN);
+        }
+        
+        // 标签
+        fb_draw_string(20, y, item->label, is_selected ? COLOR_WHITE : C_LGRAY, 2);
+        
+        // 根据类型显示值
+        int16_t value_x = SCREEN_WIDTH - 150;
+        char val_buf[32];
+        
+        switch (item->type) {
+            case SETTING_TYPE_BOOL:
+                snprintf(val_buf, sizeof(val_buf), item->value.bool_val ? "ON" : "OFF");
+                fb_draw_string(value_x, y, val_buf, 
+                              item->value.bool_val ? COLOR_GREEN : COLOR_RED, 2);
+                break;
+                
+            case SETTING_TYPE_INT:
+                snprintf(val_buf, sizeof(val_buf), "%d", item->value.int_val);
+                fb_draw_string(value_x, y, val_buf, COLOR_YELLOW, 2);
+                break;
+                
+            case SETTING_TYPE_ACTION:
+                fb_draw_string(value_x, y, "[Action]", COLOR_ORANGE, 2);
+                break;
+        }
+        
+        y += 35;
+    }
+    
+    // 底部操作提示
+    fb_draw_string(15, SCREEN_HEIGHT - 20, 
+                   "BOOT:Next  Double:Edit  Long:Back", C_DGRAY, 1);
+    
+    gui_flush();
+}
+
+// ============================================================================
+// 页面切换动画实现
+// ============================================================================
+
+// 临时缓冲，用于保存旧页面的帧缓冲
+static uint16_t *s_old_fb = NULL;
+
+// 分配临时缓冲
+static bool alloc_temp_buffer(void)
+{
+    if (s_old_fb) {
+        return true;  // 已经分配过
+    }
+    
+    size_t fb_size = SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t);
+    s_old_fb = heap_caps_malloc(fb_size, MALLOC_CAP_SPIRAM);
+    if (!s_old_fb) {
+        ESP_LOGW(TAG, "Failed to allocate temp buffer in PSRAM, try internal RAM");
+        s_old_fb = malloc(fb_size);
+    }
+    
+    if (!s_old_fb) {
+        ESP_LOGE(TAG, "Failed to allocate temp buffer for page transition");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Temp buffer allocated for page transition");
+    return true;
+}
+
+void gui_animate_page_transition(void (*old_page_render)(void), 
+                                  void (*new_page_render)(void),
+                                  anim_direction_t direction)
+{
+    if (!old_page_render || !new_page_render) {
+        // 没有回调，直接显示新页面
+        if (new_page_render) new_page_render();
+        return;
+    }
+    
+    // 分配临时缓冲
+    if (!alloc_temp_buffer()) {
+        // 分配失败，直接显示新页面
+        if (new_page_render) new_page_render();
+        return;
+    }
+    
+    // 1. 渲染旧页面到当前帧缓冲
+    old_page_render();
+    
+    // 2. 保存旧页面到临时缓冲
+    memcpy(s_old_fb, s_fb, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t));
+    
+    // 3. 渲染新页面到当前帧缓冲
+    new_page_render();
+    
+    // 4. 执行滑动动画
+    int16_t step = 20;  // 每步移动的像素数
+    int16_t total_steps = SCREEN_WIDTH / step;
+    
+    for (int i = 1; i <= total_steps; i++) {
+        int16_t offset = i * step;
+        
+        // 混合绘制两页内容
+        for (int16_t y = 0; y < SCREEN_HEIGHT; y++) {
+            for (int16_t x = 0; x < SCREEN_WIDTH; x++) {
+                uint16_t color;
+                
+                switch (direction) {
+                    case ANIM_DIR_LEFT:
+                        if (x < offset) {
+                            // 左半部分显示新页面的右半部分
+                            color = s_fb[y * SCREEN_WIDTH + (x + SCREEN_WIDTH - offset)];
+                        } else {
+                            // 右半部分显示旧页面的左半部分
+                            color = s_old_fb[y * SCREEN_WIDTH + (x - offset)];
+                        }
+                        break;
+                        
+                    case ANIM_DIR_RIGHT:
+                        if (x < SCREEN_WIDTH - offset) {
+                            // 左半部分显示旧页面的右半部分
+                            color = s_old_fb[y * SCREEN_WIDTH + (x + offset)];
+                        } else {
+                            // 右半部分显示新页面的左半部分
+                            color = s_fb[y * SCREEN_WIDTH + (x - (SCREEN_WIDTH - offset))];
+                        }
+                        break;
+                        
+                    default:
+                        color = s_fb[y * SCREEN_WIDTH + x];
+                        break;
+                }
+                
+                fb_set_pixel(x, y, color);
+            }
+        }
+        
+        gui_flush();
+        vTaskDelay(pdMS_TO_TICKS(16));  // ~60fps
+    }
+    
+    // 确保最后显示完整的新页面
+    new_page_render();
 }

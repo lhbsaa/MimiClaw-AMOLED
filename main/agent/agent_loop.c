@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_task_wdt.h"
 #include "cJSON.h"
 
 static const char *TAG = "agent";
@@ -195,6 +196,11 @@ static void agent_loop_task(void *arg)
 {
     ESP_LOGI(TAG, "Agent loop started on core %d", xPortGetCoreID());
 
+    /* 订阅 Task Watchdog Timer */
+    ESP_LOGI(TAG, "Subscribing to Task WDT (timeout=%ds)", CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+    esp_task_wdt_reset();  // 立即喂一次狗
+
     /* Allocate large buffers from PSRAM */
     char *system_prompt = heap_caps_calloc(1, MIMI_CONTEXT_BUF_SIZE, MALLOC_CAP_SPIRAM);
     char *history_json = heap_caps_calloc(1, MIMI_LLM_STREAM_BUF_SIZE, MALLOC_CAP_SPIRAM);
@@ -202,6 +208,9 @@ static void agent_loop_task(void *arg)
 
     if (!system_prompt || !history_json || !tool_output) {
         ESP_LOGE(TAG, "Failed to allocate PSRAM buffers");
+        free(system_prompt);
+        free(history_json);
+        free(tool_output);
         vTaskDelete(NULL);
         return;
     }
@@ -209,11 +218,16 @@ static void agent_loop_task(void *arg)
     const char *tools_json = tool_registry_get_tools_json();
 
     while (1) {
+        esp_task_wdt_reset();  // 循环开始喂狗
+        
         mimi_msg_t msg;
-        esp_err_t err = message_bus_pop_inbound(&msg, UINT32_MAX);
-        if (err != ESP_OK) continue;
+        esp_err_t err = message_bus_pop_inbound(&msg, pdMS_TO_TICKS(2000));  // 2秒超时，确保WDT能及时喂狗
+        if (err != ESP_OK) {
+            continue;  // 超时，回到循环顶部喂狗
+        }
 
         ESP_LOGI(TAG, "Processing message from %s:%s", msg.channel, msg.chat_id);
+        esp_task_wdt_reset();
 
         /* 1. Build system prompt */
         context_build_system_prompt(system_prompt, MIMI_CONTEXT_BUF_SIZE);
@@ -291,11 +305,24 @@ static void agent_loop_task(void *arg)
 #endif
 
             llm_response_t resp;
+            /* Temporarily unsubscribe from WDT during LLM call (may block 30-120s) */
+            esp_task_wdt_delete(NULL);
             err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
+            esp_task_wdt_add(NULL);
+            esp_task_wdt_reset();
 
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "LLM call failed: %s", esp_err_to_name(err));
-                break;
+                /* Retry once with backoff on transient network errors */
+                ESP_LOGW(TAG, "LLM call failed: %s, retrying in 3s...", esp_err_to_name(err));
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                esp_task_wdt_delete(NULL);
+                err = llm_chat_tools(system_prompt, messages, tools_json, &resp);
+                esp_task_wdt_add(NULL);
+                esp_task_wdt_reset();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "LLM call retry failed: %s", esp_err_to_name(err));
+                    break;
+                }
             }
 
             if (!resp.tool_use) {
@@ -316,7 +343,12 @@ static void agent_loop_task(void *arg)
             cJSON_AddItemToArray(messages, asst_msg);
 
             /* Execute tools and append results */
+            /* Temporarily unsubscribe from WDT during tool execution
+             * (web_search HTTP/TLS may block 5-30s) */
+            esp_task_wdt_delete(NULL);
             cJSON *tool_results = build_tool_results(&resp, &msg, tool_output, TOOL_OUTPUT_SIZE);
+            esp_task_wdt_add(NULL);
+            esp_task_wdt_reset();
             cJSON *result_msg = cJSON_CreateObject();
             cJSON_AddStringToObject(result_msg, "role", "user");
             cJSON_AddItemToObject(result_msg, "content", tool_results);

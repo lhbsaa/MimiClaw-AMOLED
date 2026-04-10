@@ -11,11 +11,17 @@
 #define MIMI_CHAN_CLI        "cli"
 #define MIMI_CHAN_SYSTEM     "system"
 
-/* Message types on the bus */
+/* Message types on the bus.
+ *
+ * Ownership contract for `content`:
+ *   - Producer allocates with strdup()/malloc() and pushes msg.
+ *   - On push SUCCESS: queue owns content. Consumer must free() after use.
+ *   - On push FAILURE: caller still owns content and must free() it.
+ */
 typedef struct {
     char channel[16];       /* "telegram", "websocket", "cli" */
     char chat_id[96];       /* Telegram/Feishu chat_id, open_id, or WS client id */
-    char *content;          /* Heap-allocated message text (caller must free) */
+    char *content;          /* Heap-allocated; see ownership contract above */
 } mimi_msg_t;
 
 /**

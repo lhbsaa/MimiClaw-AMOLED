@@ -48,7 +48,7 @@ Based on the original MimiClaw, this version adds:
 
 ### Prerequisites
 
-- ESP-IDF v5.5+ installed
+- ESP-IDF v5.3+ installed (tested with v5.3.2)
 - Python 3.10+
 
 ### Build & Flash
@@ -229,19 +229,50 @@ mimi> restart
 ```
 MimiClaw-AMOLED/
 ├── main/
+│   ├── agent/
+│   │   ├── agent_loop.c         # ReAct agent loop
+│   │   └── context_builder.c    # System prompt builder
+│   ├── bus/
+│   │   └── message_bus.c        # Inbound/outbound queues
+│   ├── channels/
+│   │   ├── telegram/telegram_bot.c  # Telegram long polling
+│   │   └── feishu/feishu_bot.c      # Feishu WebSocket
+│   ├── cron/
+│   │   └── cron_service.c       # Scheduled tasks
 │   ├── display/
-│   │   ├── display_manager.c   # QSPI display driver
-│   │   ├── simple_gui.c        # Frame buffer graphics
-│   │   └── ui_main.c           # UI controller
+│   │   ├── display_manager.c    # QSPI display driver
+│   │   ├── simple_gui.c         # Frame buffer graphics
+│   │   └── ui_main.c            # UI controller
+│   ├── gateway/
+│   │   └── ws_server.c          # WebSocket server
+│   ├── heartbeat/
+│   │   └── heartbeat.c          # Periodic heartbeat
+│   ├── llm/
+│   │   └── llm_proxy.c          # Multi-provider LLM API
+│   ├── memory/
+│   │   ├── memory_store.c       # Long-term memory
+│   │   └── session_mgr.c        # Per-chat sessions
 │   ├── peripherals/
-│   │   ├── boot_button.c       # Button handler
-│   │   └── battery_adc.c       # Battery monitor
-│   └── mimi_config.h           # Configuration
-├── docs/
-│   ├── HARDWARE.md             # Hardware reference
-│   ├── DISPLAY_DRIVER.md       # Display driver docs
-│   └── TROUBLESHOOTING.md      # Troubleshooting guide
-└── spiffs_data/                # Memory files
+│   │   ├── boot_button.c        # Button handler
+│   │   ├── battery_adc.c        # Battery monitor
+│   │   └── time_sync.c          # NTP time sync
+│   ├── proxy/
+│   │   └── http_proxy.c         # HTTP/SOCKS5 proxy
+│   ├── tools/
+│   │   ├── tool_registry.c      # Tool dispatch
+│   │   ├── tool_web_search.c    # Brave/Tavily search
+│   │   ├── tool_files.c         # File read/write/list
+│   │   ├── tool_cron.c          # Cron management
+│   │   └── tool_hardware.c      # GPIO/LED control
+│   ├── skills/
+│   │   └── skill_loader.c       # SPIFFS skill loader
+│   └── mimi_config.h            # Configuration
+├── docs/                        # Developer documentation
+├── spiffs_data/                 # SPIFFS initial data
+│   ├── config/                  # SOUL.md, USER.md
+│   ├── memory/                  # MEMORY.md
+│   └── skills/                  # Skill definitions
+└── .github/workflows/           # CI/CD
 ```
 
 ## Developer Documentation

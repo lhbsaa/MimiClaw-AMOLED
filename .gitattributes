@@ -1,0 +1,38 @@
+# Normalize line endings for text files
+* text=auto
+
+# Source code
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.py text eol=lf
+
+# Build/config
+*.cmake text eol=lf
+*.csv text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+CMakeLists.txt text eol=lf
+Makefile text eol=lf
+Kconfig text eol=lf
+Kconfig.projbuild text eol=lf
+sdkconfig.defaults text eol=lf
+sdkconfig.defaults.* text eol=lf
+
+# Documentation
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+LICENSE text eol=lf
+
+# Scripts
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# Binary files
+*.bin binary
+*.elf binary
+*.map binary
+*.png binary
+*.jpg binary
+*.gif binary

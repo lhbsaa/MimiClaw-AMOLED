@@ -18,6 +18,7 @@ static const char *TAG = "heartbeat";
     "If nothing needs attention, reply with just: HEARTBEAT_OK"
 
 static TimerHandle_t s_heartbeat_timer = NULL;
+static volatile bool s_heartbeat_pending = false;
 
 /* ── Content check ────────────────────────────────────────────── */
 
@@ -103,12 +104,13 @@ static bool heartbeat_send(void)
     return true;
 }
 
-/* ── Timer callback ───────────────────────────────────────────── */
+/* ── Timer callback (runs in Tmr Svc context — no blocking I/O!) ─── */
 
 static void heartbeat_timer_callback(TimerHandle_t xTimer)
 {
     (void)xTimer;
-    heartbeat_send();
+    /* Only set a flag; actual SPIFFS I/O is done by heartbeat_poll() in a task context */
+    s_heartbeat_pending = true;
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -162,4 +164,12 @@ void heartbeat_stop(void)
 bool heartbeat_trigger(void)
 {
     return heartbeat_send();
+}
+
+void heartbeat_poll(void)
+{
+    if (s_heartbeat_pending) {
+        s_heartbeat_pending = false;
+        heartbeat_send();
+    }
 }

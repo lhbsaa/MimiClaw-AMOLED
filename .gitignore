@@ -16,7 +16,9 @@ build/
 sdkconfig.old
 sdkconfig.*
 !sdkconfig.defaults
+!sdkconfig.defaults.*
 compile_commands.json
+managed_components/
 
 # Python
 __pycache__/
@@ -31,3 +33,4 @@ __pycache__/
 # Logs and temp
 *.log
 *.tmp
+build_now.bat

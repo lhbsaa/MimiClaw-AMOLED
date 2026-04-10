@@ -25,7 +25,7 @@ We accept contributions in these areas:
 
 ## Development Setup
 
-- Install ESP-IDF v5.5+.
+- Install ESP-IDF v5.3+ (tested with v5.3.2).
 - Target hardware: LILYGO T-Display-S3 AMOLED 1.91"
 - Build targets are in `idf.py`.
 - Default config lives in `main/mimi_secrets.h.example`.

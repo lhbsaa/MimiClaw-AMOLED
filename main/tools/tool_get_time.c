@@ -35,29 +35,26 @@ static bool parse_and_set_time(const char *date_str, char *out, size_t out_size)
     }
     if (mon < 0) return false;
 
-    struct tm tm = {
-        .tm_sec = sec, .tm_min = min, .tm_hour = hour,
-        .tm_mday = day, .tm_mon = mon, .tm_year = year - 1900,
-    };
+    /* Convert UTC date components directly to epoch (thread-safe, no TZ manipulation).
+     * Uses the well-known day-count formula from the Gregorian calendar. */
+    {
+        int y = year;
+        int m = mon + 1;  /* 1-based month */
+        if (m <= 2) { y--; m += 12; }
+        long days = 365L * y + y / 4 - y / 100 + y / 400
+                   + (153 * (m - 3) + 2) / 5 + day - 719469L;
+        time_t t = (time_t)days * 86400 + hour * 3600 + min * 60 + sec;
 
-    /* Convert UTC to epoch — mktime expects local, so temporarily set UTC */
-    setenv("TZ", "UTC0", 1);
-    tzset();
-    time_t t = mktime(&tm);
+        if (t < 0) return false;
 
-    /* Restore timezone */
-    setenv("TZ", MIMI_TIMEZONE, 1);
-    tzset();
+        struct timeval tv = { .tv_sec = t };
+        settimeofday(&tv, NULL);
 
-    if (t < 0) return false;
-
-    struct timeval tv = { .tv_sec = t };
-    settimeofday(&tv, NULL);
-
-    /* Format in local time */
-    struct tm local;
-    localtime_r(&t, &local);
-    strftime(out, out_size, "%Y-%m-%d %H:%M:%S %Z (%A)", &local);
+        /* Format in local time */
+        struct tm local;
+        localtime_r(&t, &local);
+        strftime(out, out_size, "%Y-%m-%d %H:%M:%S %Z (%A)", &local);
+    }
 
     return true;
 }

@@ -156,6 +156,54 @@ typedef struct {
 void gui_show_quick_menu(const menu_item_t *items, int count, int selected);
 
 // ============================================================================
+// 设置页面
+// ============================================================================
+
+// 设置项类型
+typedef enum {
+    SETTING_TYPE_BOOL,      // 开关类型
+    SETTING_TYPE_INT,       // 整数类型
+    SETTING_TYPE_ACTION,    // 操作类型
+} setting_type_t;
+
+// 设置项定义
+typedef struct {
+    const char *label;      // 设置项名称
+    const char *desc;       // 设置项描述
+    setting_type_t type;    // 设置项类型
+    union {
+        bool bool_val;      // 布尔值
+        int int_val;        // 整数值
+    } value;
+    int min_val;            // 最小值（仅int类型）
+    int max_val;            // 最大值（仅int类型）
+    void (*action)(void);   // 操作回调（仅action类型）
+} setting_item_t;
+
+// 显示设置页面
+void gui_show_settings_page(const setting_item_t *items, int count, int selected);
+
+// ============================================================================
+// 页面切换动画
+// ============================================================================
+
+// 页面切换方向
+typedef enum {
+    ANIM_DIR_LEFT,    // 向左滑动（下一页）
+    ANIM_DIR_RIGHT,   // 向右滑动（上一页）
+    ANIM_DIR_UP,      // 向上滑动
+    ANIM_DIR_DOWN,    // 向下滑动
+} anim_direction_t;
+
+// 执行页面切换动画
+// old_page_render: 渲染旧页面的回调
+// new_page_render: 渲染新页面的回调
+// direction: 动画方向
+void gui_animate_page_transition(void (*old_page_render)(void), 
+                                  void (*new_page_render)(void),
+                                  anim_direction_t direction);
+
+// ============================================================================
 // AOD 常亮显示模式
 // ============================================================================
 

@@ -15,8 +15,8 @@ static const char *TAG = "wifi";
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_count = 0;
 static char s_ip_str[16] = "0.0.0.0";
-static bool s_connected = false;
-static bool s_reconnect_enabled = true;
+static volatile bool s_connected = false;
+static volatile bool s_reconnect_enabled = true;
 
 static const char *wifi_reason_to_str(wifi_err_reason_t reason)
 {
@@ -46,19 +46,35 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         if (disc) {
             ESP_LOGW(TAG, "Disconnected (reason=%d:%s)", disc->reason, wifi_reason_to_str(disc->reason));
         }
-        if (s_reconnect_enabled && s_retry_count < MIMI_WIFI_MAX_RETRY) {
-            /* Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s */
-            uint32_t delay_ms = MIMI_WIFI_RETRY_BASE_MS << s_retry_count;
-            if (delay_ms > MIMI_WIFI_RETRY_MAX_MS) {
-                delay_ms = MIMI_WIFI_RETRY_MAX_MS;
+        if (s_reconnect_enabled) {
+            uint32_t delay_ms;
+            if (s_retry_count < MIMI_WIFI_MAX_RETRY) {
+                /* Fast phase: exponential backoff 1s, 2s, 4s, ... capped at 30s */
+                int shift = s_retry_count < 31 ? s_retry_count : 31;
+                delay_ms = MIMI_WIFI_RETRY_BASE_MS << shift;
+                if (delay_ms > MIMI_WIFI_RETRY_MAX_MS) {
+                    delay_ms = MIMI_WIFI_RETRY_MAX_MS;
+                }
+                ESP_LOGW(TAG, "Disconnected, fast retry %d/%d in %" PRIu32 "ms",
+                         s_retry_count + 1, MIMI_WIFI_MAX_RETRY, delay_ms);
+            } else {
+                /* Slow phase: retry every 60s indefinitely for long-running deployment */
+                delay_ms = 60000;
+                if (s_retry_count == MIMI_WIFI_MAX_RETRY) {
+                    ESP_LOGW(TAG, "Fast retries exhausted, switching to slow reconnect (every 60s)");
+                    xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+                }
+                /* Log every 10th slow retry to avoid log spam */
+                if ((s_retry_count - MIMI_WIFI_MAX_RETRY) % 10 == 0) {
+                    ESP_LOGW(TAG, "Slow reconnect attempt %d (every 60s)",
+                             s_retry_count - MIMI_WIFI_MAX_RETRY + 1);
+                }
             }
-            ESP_LOGW(TAG, "Disconnected, retry %d/%d in %" PRIu32 "ms",
-                     s_retry_count + 1, MIMI_WIFI_MAX_RETRY, delay_ms);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
             esp_wifi_connect();
             s_retry_count++;
         } else {
-            ESP_LOGE(TAG, "Failed to connect after %d retries", MIMI_WIFI_MAX_RETRY);
+            ESP_LOGE(TAG, "Reconnect disabled, WiFi stays disconnected");
             xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {

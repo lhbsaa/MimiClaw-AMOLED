@@ -94,7 +94,8 @@ esp_err_t http_proxy_clear(void)
 
     s_proxy_host[0] = '\0';
     s_proxy_port = 0;
-    strcpy(s_proxy_type, "http"); // Reset to default
+    strncpy(s_proxy_type, "http", sizeof(s_proxy_type) - 1);
+    s_proxy_type[sizeof(s_proxy_type) - 1] = '\0';
     ESP_LOGI(TAG, "Proxy cleared");
     return ESP_OK;
 }
@@ -156,7 +157,7 @@ static int open_connect_tunnel(const char *host, int port, int timeout_ms)
     freeaddrinfo(res);
     ESP_LOGI(TAG, "Connected to proxy %s:%d", s_proxy_host, s_proxy_port);
 
-    char req[256];
+    char req[512];
     int len = snprintf(req, sizeof(req),
         "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", host, port, host, port);
 
@@ -168,8 +169,14 @@ static int open_connect_tunnel(const char *host, int port, int timeout_ms)
     if (sock_read_line(sock, line, sizeof(line), timeout_ms) < 0) {
         ESP_LOGE(TAG, "No response from proxy"); close(sock); return -1;
     }
-    if (strstr(line, "200") == NULL) {
-        ESP_LOGE(TAG, "CONNECT rejected: %s", line); close(sock); return -1;
+    /* Validate HTTP status line: must start with "HTTP/" and contain status 200 */
+    int http_status = 0;
+    if (strncmp(line, "HTTP/", 5) == 0) {
+        const char *sp = strchr(line, ' ');
+        if (sp) http_status = atoi(sp + 1);
+    }
+    if (http_status != 200) {
+        ESP_LOGE(TAG, "CONNECT rejected (status %d): %s", http_status, line); close(sock); return -1;
     }
 
     /* Consume remaining response headers */
@@ -225,6 +232,10 @@ static int open_socks5_tunnel(const char *host, int port, int timeout_ms)
 
     /* SOCKS5 connect request: version 5, connect command, reserved, domain name address type */
     size_t host_len = strlen(host);
+    if (host_len > 255) {
+        ESP_LOGE(TAG, "SOCKS5 hostname too long (%d bytes, max 255)", (int)host_len);
+        close(sock); return -1;
+    }
     size_t req_len = 4 + 1 + host_len + 2;
     unsigned char *req = malloc(req_len);
     if (!req) { close(sock); return -1; }
@@ -244,11 +255,11 @@ static int open_socks5_tunnel(const char *host, int port, int timeout_ms)
     }
     free(req);
 
-    /* Receive connect response */
+    /* Receive connect response: minimum 4 bytes (VER+REP+RSV+ATYP) needed for validation */
     unsigned char resp[256];
     int resp_len = recv(sock, resp, sizeof(resp), 0);
-    if (resp_len < 10) {
-        ESP_LOGE(TAG, "No response from SOCKS5 proxy"); close(sock); return -1;
+    if (resp_len < 4) {
+        ESP_LOGE(TAG, "SOCKS5 response too short (%d bytes)", resp_len); close(sock); return -1;
     }
 
     if (resp[0] != 0x05 || resp[1] != 0x00) {

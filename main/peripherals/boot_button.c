@@ -78,7 +78,14 @@ esp_err_t boot_button_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&io_conf));
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+
+    /* gpio_install_isr_service may already be installed by another driver */
+    esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to install ISR service: %s", esp_err_to_name(isr_err));
+        return isr_err;
+    }
+
     ESP_ERROR_CHECK(gpio_isr_handler_add(BUTTON_BOOT_PIN, gpio_isr_handler, NULL));
 
     const esp_timer_create_args_t timer_args = {

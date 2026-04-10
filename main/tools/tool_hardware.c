@@ -11,6 +11,7 @@
 #include "tools/tool_hardware.h"
 #include "mimi_config.h"
 #include "peripherals/battery_adc.h"
+#include "peripherals/health_monitor.h"
 
 #include "driver/gpio.h"
 #include "driver/temperature_sensor.h"
@@ -140,11 +141,20 @@ static esp_err_t temp_sensor_init(void)
 {
     if (s_temp_sensor_inited) return ESP_OK;
 
+    /* 优先复用 health_monitor 已安装的全局温度传感器句柄 */
+    s_temp_sensor = health_monitor_get_temp_sensor();
+    if (s_temp_sensor != NULL) {
+        s_temp_sensor_inited = true;
+        ESP_LOGI(TAG, "Reusing temperature sensor from health monitor");
+        return ESP_OK;
+    }
+
+    /* 回退：health_monitor 尚未初始化时自行安装 */
     temperature_sensor_config_t temp_sensor = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
     esp_err_t ret = temperature_sensor_install(&temp_sensor, &s_temp_sensor);
     if (ret == ESP_OK) {
         s_temp_sensor_inited = true;
-        ESP_LOGI(TAG, "Temperature sensor initialized");
+        ESP_LOGI(TAG, "Temperature sensor initialized (standalone)");
     }
     return ret;
 }

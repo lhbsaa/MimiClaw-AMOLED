@@ -28,3 +28,6 @@ message(STATUS "MimiClaw AMOLED Project")
 message(STATUS "Target: ESP32-S3 with RM67162 AMOLED")
 message(STATUS "Resolution: 240x536")
 message(STATUS "Touch: CST816S")
+
+# Package SPIFFS data (skills, config, memory templates)
+spiffs_create_partition_image(spiffs spiffs_data FLASH_IN_PROJECT)

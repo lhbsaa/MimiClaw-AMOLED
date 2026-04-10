@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_task_wdt.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -19,6 +20,7 @@ static char s_bot_token[128] = MIMI_SECRET_TG_TOKEN;
 static int64_t s_update_offset = 0;
 static int64_t s_last_saved_offset = -1;
 static int64_t s_last_offset_save_us = 0;
+static portMUX_TYPE s_offset_mux = portMUX_INITIALIZER_UNLOCKED;
 
 #define TG_OFFSET_NVS_KEY            "update_offset"
 #define TG_DEDUP_CACHE_SIZE          64
@@ -72,14 +74,19 @@ static void seen_msg_insert(uint64_t key)
 
 static void save_update_offset_if_needed(bool force)
 {
-    if (s_update_offset <= 0) {
+    taskENTER_CRITICAL(&s_offset_mux);
+    int64_t offset = s_update_offset;
+    int64_t last_saved = s_last_saved_offset;
+    taskEXIT_CRITICAL(&s_offset_mux);
+
+    if (offset <= 0) {
         return;
     }
 
     int64_t now = esp_timer_get_time();
     bool should_save = force;
-    if (!should_save && s_last_saved_offset >= 0) {
-        if ((s_update_offset - s_last_saved_offset) >= TG_OFFSET_SAVE_STEP) {
+    if (!should_save && last_saved >= 0) {
+        if ((offset - last_saved) >= TG_OFFSET_SAVE_STEP) {
             should_save = true;
         } else if ((now - s_last_offset_save_us) >= TG_OFFSET_SAVE_INTERVAL_US) {
             should_save = true;
@@ -97,9 +104,11 @@ static void save_update_offset_if_needed(bool force)
         return;
     }
 
-    if (nvs_set_i64(nvs, TG_OFFSET_NVS_KEY, s_update_offset) == ESP_OK) {
+    if (nvs_set_i64(nvs, TG_OFFSET_NVS_KEY, offset) == ESP_OK) {
         if (nvs_commit(nvs) == ESP_OK) {
-            s_last_saved_offset = s_update_offset;
+            taskENTER_CRITICAL(&s_offset_mux);
+            s_last_saved_offset = offset;
+            taskEXIT_CRITICAL(&s_offset_mux);
             s_last_offset_save_us = now;
         }
     }
@@ -116,7 +125,10 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 new_cap = resp->len + evt->data_len + 1;
             }
             char *tmp = realloc(resp->buf, new_cap);
-            if (!tmp) return ESP_ERR_NO_MEM;
+            if (!tmp) {
+                ESP_LOGE(TAG, "HTTP response realloc failed (need %d bytes)", (int)new_cap);
+                return ESP_ERR_NO_MEM;
+            }
             resp->buf = tmp;
             resp->cap = new_cap;
         }
@@ -250,10 +262,10 @@ static char *tg_api_call(const char *method, const char *post_data)
     return tg_api_call_direct(method, post_data);
 }
 
-static bool tg_response_is_ok(const char *resp, const char **out_desc)
+static bool tg_response_is_ok(const char *resp, char *out_desc, size_t desc_size)
 {
-    if (out_desc) {
-        *out_desc = NULL;
+    if (out_desc && desc_size > 0) {
+        out_desc[0] = '\0';
     }
     if (!resp) {
         return false;
@@ -263,10 +275,11 @@ static bool tg_response_is_ok(const char *resp, const char **out_desc)
     if (root) {
         cJSON *ok_field = cJSON_GetObjectItem(root, "ok");
         bool ok = cJSON_IsTrue(ok_field);
-        if (!ok && out_desc) {
+        if (!ok && out_desc && desc_size > 0) {
             cJSON *desc = cJSON_GetObjectItem(root, "description");
             if (desc && cJSON_IsString(desc)) {
-                *out_desc = desc->valuestring;
+                strncpy(out_desc, desc->valuestring, desc_size - 1);
+                out_desc[desc_size - 1] = '\0';
             }
         }
         cJSON_Delete(root);
@@ -376,8 +389,10 @@ static void telegram_poll_task(void *arg)
 {
     ESP_LOGI(TAG, "Telegram polling task started");
     bool token_warned = false;
+    bool wdt_subscribed = false;  /* WDT由API调用前后的delete/add管理 */
 
     while (1) {
+        if (wdt_subscribed) esp_task_wdt_reset();
         if (s_bot_token[0] == '\0') {
             if (!token_warned) {
                 ESP_LOGW(TAG, "No bot token configured. Use: set_tg_token <TOKEN>");
@@ -392,7 +407,12 @@ static void telegram_poll_task(void *arg)
                  "getUpdates?offset=%" PRId64 "&timeout=%d",
                  s_update_offset, MIMI_TG_POLL_TIMEOUT_S);
 
+        /* Temporarily unsubscribe from WDT during long-poll (may block 30+s) */
+        if (wdt_subscribed) { esp_task_wdt_delete(NULL); wdt_subscribed = false; }
         char *resp = tg_api_call(params, NULL);
+        esp_task_wdt_add(NULL); wdt_subscribed = true;
+        esp_task_wdt_reset();
+
         if (resp) {
             process_updates(resp);
             free(resp);
@@ -496,12 +516,12 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
         int sent_ok = 0;
         bool markdown_failed = false;
         if (resp) {
-            const char *desc = NULL;
-            sent_ok = tg_response_is_ok(resp, &desc);
+            char desc[128] = {0};
+            sent_ok = tg_response_is_ok(resp, desc, sizeof(desc));
             if (!sent_ok) {
                 markdown_failed = true;
                 ESP_LOGI(TAG, "Markdown rejected by Telegram for %s: %s",
-                         chat_id, desc ? desc : "unknown");
+                         chat_id, desc[0] ? desc : "unknown");
             }
         }
 
@@ -522,10 +542,10 @@ esp_err_t telegram_send_message(const char *chat_id, const char *text)
                 char *resp2 = tg_api_call("sendMessage", json2);
                 free(json2);
                 if (resp2) {
-                    const char *desc2 = NULL;
-                    sent_ok = tg_response_is_ok(resp2, &desc2);
+                    char desc2[128] = {0};
+                    sent_ok = tg_response_is_ok(resp2, desc2, sizeof(desc2));
                     if (!sent_ok) {
-                        ESP_LOGE(TAG, "Plain send failed: %s", desc2 ? desc2 : "unknown");
+                        ESP_LOGE(TAG, "Plain send failed: %s", desc2[0] ? desc2 : "unknown");
                         ESP_LOGE(TAG, "Telegram raw response: %.300s", resp2);
                     }
                     free(resp2);

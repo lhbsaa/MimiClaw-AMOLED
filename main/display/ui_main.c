@@ -15,6 +15,7 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
@@ -26,12 +27,14 @@ static const char *TAG = "ui_main";
 // ============================================================================
 static void menu_action_ask_ai(void);
 static void menu_action_system_info(void);
+static void menu_action_settings(void);
 static void menu_action_clear_logs(void);
 static void menu_action_restart(void);
 
 static const menu_item_t s_quick_menu_items[] = {
     {"Ask AI",      "?", menu_action_ask_ai},
     {"System Info", "S", menu_action_system_info},
+    {"Settings",    "G", menu_action_settings},
     {"Clear Logs",  "C", menu_action_clear_logs},
     {"Restart",     "R", menu_action_restart},
 };
@@ -47,6 +50,7 @@ typedef enum {
     PAGE_MESSAGE,       // 页面 4: 消息气泡
     PAGE_LOG,           // 页面 5: 日志
     PAGE_QUICK_MENU,    // 页面 6: 快捷菜单
+    PAGE_SETTINGS,      // 页面 7: 设置页面
     PAGE_COUNT
 } ui_page_t;
 
@@ -56,6 +60,7 @@ static const ui_page_t s_nav_pages[] = {
     PAGE_SYSTEM_MSG,
     PAGE_MESSAGE,
     PAGE_LOG,
+    PAGE_SETTINGS,
 };
 #define NAV_PAGE_COUNT  (sizeof(s_nav_pages) / sizeof(s_nav_pages[0]))
 
@@ -66,11 +71,14 @@ static const char *s_page_names[] = {
     [PAGE_SYSTEM_MSG] = "System",
     [PAGE_MESSAGE]    = "Message",
     [PAGE_LOG]        = "Logs",
+    [PAGE_SETTINGS]   = "Settings",
 };
 
 // ============================================================================
 // UI 状态
 // ============================================================================
+static SemaphoreHandle_t s_ui_mutex = NULL;   // 保护共享 UI 状态
+
 static bool wifi_connected = false;
 static bool telegram_connected = false;
 static char current_time[32] = "";
@@ -84,6 +92,22 @@ static bool s_splash_done = false;  // 启动画面是否结束
 // 快捷菜单状态
 static bool s_menu_active = false;
 static int s_menu_index = 0;
+
+// 设置页面状态
+static int s_settings_index = 0;
+static bool s_settings_edit_mode = false;
+
+// 设置项定义（示例）
+static void setting_action_restart(void);
+static void setting_action_reset_config(void);
+
+static setting_item_t s_settings_items[] = {
+    {"AOD Mode", "Always On Display", SETTING_TYPE_BOOL, {.bool_val = false}, 0, 0, NULL},
+    {"Brightness", "Display brightness", SETTING_TYPE_INT, {.int_val = 175}, 50, 255, NULL},
+    {"Restart", "Restart device", SETTING_TYPE_ACTION, {.bool_val = false}, 0, 0, setting_action_restart},
+    {"Reset Config", "Reset to defaults", SETTING_TYPE_ACTION, {.bool_val = false}, 0, 0, setting_action_reset_config},
+};
+#define SETTINGS_COUNT (sizeof(s_settings_items) / sizeof(s_settings_items[0]))
 
 // AOD 模式状态
 static bool s_aod_mode = false;
@@ -112,6 +136,15 @@ typedef struct {
 } msg_history_t;
 static msg_history_t s_msg_history[MAX_MSG_HISTORY];
 static int s_msg_count = 0;
+
+// 自动返回主页
+#define AUTO_HOME_TIMEOUT_US  (120 * 1000000LL)  // 120 秒
+static int64_t s_last_activity_us = 0;
+
+static void ui_reset_activity(void)
+{
+    s_last_activity_us = esp_timer_get_time();
+}
 
 // ============================================================================
 // 前向声明
@@ -228,12 +261,25 @@ static void ui_show_page(ui_page_t page)
             gui_show_log();
             break;
             
+        case PAGE_SETTINGS:
+            // 设置页面
+            gui_show_settings_page(s_settings_items, SETTINGS_COUNT, s_settings_index);
+            return;  // gui_show_settings_page 已经调用了 gui_flush
+            
         default:
             break;
     }
     
-    // 底部操作提示
-    gui_draw_string(12, SCREEN_HEIGHT - 20, "BOOT:Next", COLOR_DARK_GRAY, 1);
+    // 底部操作提示（根据页面不同显示不同提示）
+    const char *hint = "BOOT:Next";
+    if (page == PAGE_SETTINGS) {
+        hint = "BOOT:Next  Double:Edit  Long:Back";
+    } else if (page == PAGE_QUICK_MENU) {
+        hint = "BOOT:Select  Double:Confirm  Long:Cancel";
+    } else {
+        hint = "BOOT:Next  2x:Ask AI  3x:Home";
+    }
+    gui_draw_string(12, SCREEN_HEIGHT - 20, hint, COLOR_DARK_GRAY, 1);
     
     gui_flush();
 }
@@ -261,14 +307,18 @@ static void update_status_bar(void)
 
 void ui_set_wifi_status(bool connected)
 {
+    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
     wifi_connected = connected;
+    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
     ESP_LOGI(TAG, "WiFi status: %s", connected ? "connected" : "disconnected");
     update_status_bar();
 }
 
 void ui_set_telegram_status(bool connected)
 {
+    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
     telegram_connected = connected;
+    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
     ESP_LOGI(TAG, "Telegram status: %s", connected ? "connected" : "disconnected");
     update_status_bar();
 }
@@ -276,19 +326,23 @@ void ui_set_telegram_status(bool connected)
 void ui_set_battery_level(uint8_t percentage)
 {
     if (percentage > 100) percentage = 100;
+    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
     battery_level = percentage;
+    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
     ESP_LOGI(TAG, "Battery level: %d%%", percentage);
     update_status_bar();
 }
 
 void ui_set_time(const char *time_str)
 {
+    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
     if (time_str) {
         strncpy(current_time, time_str, sizeof(current_time) - 1);
         current_time[sizeof(current_time) - 1] = '\0';
     } else {
         current_time[0] = '\0';
     }
+    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
     ESP_LOGI(TAG, "Time: %s", current_time);
     update_status_bar();
 }
@@ -341,6 +395,7 @@ void ui_add_message(const char *sender, const char *msg, bool is_me)
     if (!sender || !msg) return;
     
     ESP_LOGI(TAG, "Adding message from %s (%d bytes)", sender, (int)strlen(msg));
+    ui_reset_activity();
     
     // 唤醒屏幕（用户可能在休眠状态）
     display_manager_wakeup();
@@ -378,7 +433,7 @@ void ui_add_message(const char *sender, const char *msg, bool is_me)
     } else if (newline) {
         cut = newline;
     } else if (period) {
-        cut = period + 3; // 保留句号
+        cut = period + 1; // 保留句号
     }
     if (cut) {
         *cut = '\0';
@@ -394,6 +449,7 @@ void ui_add_message(const char *sender, const char *msg, bool is_me)
     gui_show_message(sender, summary, is_me, message_y_pos);
     
     // 存入消息历史缓存
+    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
     if (s_msg_count < MAX_MSG_HISTORY) {
         strncpy(s_msg_history[s_msg_count].sender, sender, sizeof(s_msg_history[0].sender) - 1);
         s_msg_history[s_msg_count].sender[sizeof(s_msg_history[0].sender) - 1] = '\0';
@@ -412,6 +468,7 @@ void ui_add_message(const char *sender, const char *msg, bool is_me)
         s_msg_history[MAX_MSG_HISTORY - 1].msg[sizeof(s_msg_history[0].msg) - 1] = '\0';
         s_msg_history[MAX_MSG_HISTORY - 1].is_me = is_me;
     }
+    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
     
     message_y_pos += 80;  // 2号字体需要更大的间距
     
@@ -502,6 +559,16 @@ static void menu_action_clear_logs(void)
     ui_show_page(PAGE_LOG);
 }
 
+static void menu_action_settings(void)
+{
+    ESP_LOGI(TAG, "Menu: Settings");
+    ui_hide_quick_menu();
+    s_current_page = PAGE_SETTINGS;
+    s_settings_index = 0;
+    s_settings_edit_mode = false;
+    ui_show_page(PAGE_SETTINGS);
+}
+
 static void menu_action_restart(void)
 {
     ESP_LOGI(TAG, "Menu: Restart");
@@ -510,6 +577,28 @@ static void menu_action_restart(void)
     gui_flush();
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
+}
+
+// 设置项操作回调
+static void setting_action_restart(void)
+{
+    ESP_LOGI(TAG, "Setting: Restart");
+    gui_clear_screen(COLOR_BLACK);
+    gui_draw_string(180, 100, "Restarting...", COLOR_RED, 3);
+    gui_flush();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+}
+
+static void setting_action_reset_config(void)
+{
+    ESP_LOGI(TAG, "Setting: Reset Config");
+    // 这里可以添加重置配置的逻辑
+    gui_add_log("SYS", "Config reset (placeholder)");
+    // 返回首页
+    s_current_page = PAGE_STATUS_BAR;
+    s_nav_index = 0;
+    ui_show_page(PAGE_STATUS_BAR);
 }
 
 // ============================================================================
@@ -541,6 +630,7 @@ static void ui_hide_quick_menu(void)
 static void on_single_click(void)
 {
     ESP_LOGI(TAG, "Single click");
+    ui_reset_activity();
     
     // 唤醒屏幕
     display_manager_wakeup();
@@ -550,6 +640,40 @@ static void on_single_click(void)
         s_menu_index = (s_menu_index + 1) % QUICK_MENU_COUNT;
         gui_show_quick_menu(s_quick_menu_items, QUICK_MENU_COUNT, s_menu_index);
         gui_flush();
+        return;
+    }
+    
+    // 如果在设置页面，选择下一个设置项或编辑值
+    if (s_current_page == PAGE_SETTINGS) {
+        if (s_settings_edit_mode) {
+            // 编辑模式：修改值
+            setting_item_t *item = &s_settings_items[s_settings_index];
+            if (item->type == SETTING_TYPE_INT) {
+                item->value.int_val += 10;
+                if (item->value.int_val > item->max_val) {
+                    item->value.int_val = item->min_val;
+                }
+                // 亮度设置实时生效
+                if (strcmp(item->label, "Brightness") == 0) {
+                    display_manager_set_brightness(item->value.int_val);
+                }
+            } else if (item->type == SETTING_TYPE_BOOL) {
+                item->value.bool_val = !item->value.bool_val;
+                // AOD 模式实时生效
+                if (strcmp(item->label, "AOD Mode") == 0) {
+                    if (item->value.bool_val) {
+                        ui_aod_enable();
+                    } else {
+                        ui_aod_disable();
+                    }
+                }
+            }
+            gui_show_settings_page(s_settings_items, SETTINGS_COUNT, s_settings_index);
+        } else {
+            // 选择模式：切换到下一项
+            s_settings_index = (s_settings_index + 1) % SETTINGS_COUNT;
+            gui_show_settings_page(s_settings_items, SETTINGS_COUNT, s_settings_index);
+        }
         return;
     }
     
@@ -598,13 +722,30 @@ static void on_single_click(void)
 
 static void on_double_click(void)
 {
-    ESP_LOGI(TAG, "Double click - Quick Ask AI");
+    ESP_LOGI(TAG, "Double click");
+    ui_reset_activity();
     display_manager_wakeup();
     
     // 如果菜单激活，确认选择
     if (s_menu_active) {
         if (s_quick_menu_items[s_menu_index].action) {
             s_quick_menu_items[s_menu_index].action();
+        }
+        return;
+    }
+    
+    // 如果在设置页面，切换编辑模式或执行操作
+    if (s_current_page == PAGE_SETTINGS) {
+        setting_item_t *item = &s_settings_items[s_settings_index];
+        if (item->type == SETTING_TYPE_ACTION) {
+            // 操作类型：直接执行
+            if (item->action) {
+                item->action();
+            }
+        } else {
+            // 切换编辑模式
+            s_settings_edit_mode = !s_settings_edit_mode;
+            gui_show_settings_page(s_settings_items, SETTINGS_COUNT, s_settings_index);
         }
         return;
     }
@@ -620,6 +761,7 @@ static void on_double_click(void)
 static void on_triple_click(void)
 {
     ESP_LOGI(TAG, "Triple click - Go Home");
+    ui_reset_activity();
     display_manager_wakeup();
     
     // 如果菜单激活，取消菜单
@@ -638,8 +780,18 @@ static void on_triple_click(void)
 
 static void on_long_press(void)
 {
-    ESP_LOGI(TAG, "Long press - Show menu");
+    ESP_LOGI(TAG, "Long press");
+    ui_reset_activity();
     display_manager_wakeup();
+    
+    // 如果在设置页面，返回上一页
+    if (s_current_page == PAGE_SETTINGS) {
+        s_settings_edit_mode = false;
+        s_current_page = PAGE_STATUS_BAR;
+        s_nav_index = 0;
+        ui_show_page(PAGE_STATUS_BAR);
+        return;
+    }
     
     // 显示快捷菜单
     if (s_nav_initialized && !s_menu_active) {
@@ -650,6 +802,7 @@ static void on_long_press(void)
 static void on_very_long_press(void)
 {
     ESP_LOGI(TAG, "Very long press - Restart");
+    ui_reset_activity();
     gui_clear_screen(COLOR_BLACK);
     gui_draw_string(180, 100, "Restarting...", COLOR_RED, 3);
     gui_flush();
@@ -760,9 +913,13 @@ static void status_update_task(void *arg)
             if (now > 1700000000) {  // 时间已同步
                 struct tm tm_info;
                 localtime_r(&now, &tm_info);
+                if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
                 snprintf(current_time, sizeof(current_time), "%02d:%02d", tm_info.tm_hour, tm_info.tm_min);
+                if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
             } else {
+                if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
                 strncpy(current_time, "--:--", sizeof(current_time) - 1);
+                if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
             }
             
             // 每10秒更新电池电量
@@ -771,10 +928,25 @@ static void status_update_task(void *arg)
                 battery_counter = 0;
                 if (battery_adc_is_ready()) {
                     int pct = battery_get_percent();
+                    if (s_ui_mutex) xSemaphoreTake(s_ui_mutex, portMAX_DELAY);
                     battery_level = (uint8_t)pct;  // 静默更新，不输出日志
+                    if (s_ui_mutex) xSemaphoreGive(s_ui_mutex);
                 }
             }
             
+            // 自动返回主页检查：120秒无活动时返回 STATUS_BAR
+            if (s_nav_initialized 
+                && s_current_page != PAGE_STATUS_BAR 
+                && s_current_page != PAGE_BOOT
+                && s_last_activity_us > 0
+                && (esp_timer_get_time() - s_last_activity_us) > AUTO_HOME_TIMEOUT_US) {
+                s_current_page = PAGE_STATUS_BAR;
+                s_nav_index = 0;
+                ui_show_page(PAGE_STATUS_BAR);
+                ESP_LOGI(TAG, "Auto-return to home after 120s timeout");
+                s_last_activity_us = esp_timer_get_time();  // 重置避免反复触发
+            }
+
             // 更新状态栏（非 AI 忙碌时）
             if (s_splash_done && s_current_page != PAGE_BOOT && !s_ai_busy) {
                 update_status_bar();
@@ -797,6 +969,10 @@ void ui_main_deinit(void)
         vTaskDelete(s_status_task);
         s_status_task = NULL;
     }
+    if (s_ui_mutex) {
+        vSemaphoreDelete(s_ui_mutex);
+        s_ui_mutex = NULL;
+    }
 }
 
 // 输入区域（空实现，简单 GUI 不支持）
@@ -810,6 +986,13 @@ void ui_show_settings_screen(void) { }
 esp_err_t ui_main_init(void)
 {
     ESP_LOGI(TAG, "Initializing UI...");
+    
+    // 创建 UI 状态互斥锁
+    s_ui_mutex = xSemaphoreCreateMutex();
+    if (!s_ui_mutex) {
+        ESP_LOGE(TAG, "Failed to create UI mutex");
+        return ESP_ERR_NO_MEM;
+    }
     
     // 初始化简单 GUI (帧缓冲模式)
     esp_err_t ret = simple_gui_init();
@@ -840,6 +1023,9 @@ esp_err_t ui_main_init(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create splash timer: %s", esp_err_to_name(ret));
     }
+    
+    // 初始化活动时间戳（用于自动返回主页超时检测）
+    s_last_activity_us = esp_timer_get_time();
     
     // 创建时间和电池更新任务 (替代定时器，避免栈溢出)
     xTaskCreate(status_update_task, "status_upd", 4096, NULL, 5, &s_status_task);

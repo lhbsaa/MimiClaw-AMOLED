@@ -156,6 +156,8 @@ esp_err_t display_manager_init(void)
     esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        vSemaphoreDelete(spi_mutex);
+        spi_mutex = NULL;
         return ret;
     }
     
@@ -175,6 +177,8 @@ esp_err_t display_manager_init(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI device add failed: %s", esp_err_to_name(ret));
         spi_bus_free(SPI2_HOST);
+        vSemaphoreDelete(spi_mutex);
+        spi_mutex = NULL;
         return ret;
     }
     
@@ -198,7 +202,11 @@ esp_err_t display_manager_init(void)
     ret = send_init_sequence();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Init sequence failed: %s", esp_err_to_name(ret));
+        spi_bus_remove_device(spi_handle);
+        spi_handle = NULL;
         spi_bus_free(SPI2_HOST);
+        vSemaphoreDelete(spi_mutex);
+        spi_mutex = NULL;
         return ret;
     }
     
@@ -238,7 +246,14 @@ esp_err_t display_manager_deinit(void)
     power_enable(false);
     
     // 释放资源
+    spi_bus_remove_device(spi_handle);
+    spi_handle = NULL;
     spi_bus_free(SPI2_HOST);
+    
+    if (spi_mutex) {
+        vSemaphoreDelete(spi_mutex);
+        spi_mutex = NULL;
+    }
     
     is_initialized = false;
     ESP_LOGI(TAG, "Display deinitialized");

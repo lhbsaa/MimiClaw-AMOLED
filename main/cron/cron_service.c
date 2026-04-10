@@ -1,6 +1,7 @@
 #include "cron/cron_service.h"
 #include "mimi_config.h"
 #include "bus/message_bus.h"
+#include "heartbeat/heartbeat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_spiffs.h"
 #include "cJSON.h"
 
 static const char *TAG = "cron";
@@ -62,9 +64,15 @@ static esp_err_t cron_load_jobs(void)
 {
     FILE *f = fopen(MIMI_CRON_FILE, "r");
     if (!f) {
-        ESP_LOGI(TAG, "No cron file found, starting fresh");
-        s_job_count = 0;
-        return ESP_OK;
+        /* Try backup file if primary is missing */
+        f = fopen(MIMI_CRON_FILE ".bak", "r");
+        if (f) {
+            ESP_LOGW(TAG, "Primary cron file missing, recovering from backup");
+        } else {
+            ESP_LOGI(TAG, "No cron file found, starting fresh");
+            s_job_count = 0;
+            return ESP_OK;
+        }
     }
 
     /* Read entire file */
@@ -207,7 +215,7 @@ static esp_err_t cron_save_jobs(void)
 
     cJSON_AddItemToObject(root, "jobs", jobs_arr);
 
-    char *json_str = cJSON_Print(root);
+    char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
     if (!json_str) {
@@ -215,9 +223,12 @@ static esp_err_t cron_save_jobs(void)
         return ESP_ERR_NO_MEM;
     }
 
-    FILE *f = fopen(MIMI_CRON_FILE, "w");
+    /* Backup current file before overwriting */
+    rename(MIMI_CRON_FILE, MIMI_CRON_FILE ".bak");
+
+    FILE *f = fopen(MIMI_CRON_FILE ".tmp", "w");
     if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s for writing", MIMI_CRON_FILE);
+        ESP_LOGE(TAG, "Failed to open temp cron file for writing");
         free(json_str);
         return ESP_FAIL;
     }
@@ -229,6 +240,15 @@ static esp_err_t cron_save_jobs(void)
 
     if (written != len) {
         ESP_LOGE(TAG, "Cron save incomplete: %d/%d bytes", (int)written, (int)len);
+        remove(MIMI_CRON_FILE ".tmp");
+        return ESP_FAIL;
+    }
+
+    /* Atomic swap: remove original, rename temp */
+    remove(MIMI_CRON_FILE);
+    if (rename(MIMI_CRON_FILE ".tmp", MIMI_CRON_FILE) != 0) {
+        ESP_LOGE(TAG, "Failed to rename temp cron file");
+        remove(MIMI_CRON_FILE ".tmp");
         return ESP_FAIL;
     }
 
@@ -237,6 +257,25 @@ static esp_err_t cron_save_jobs(void)
 }
 
 /* ── Due-job processing ───────────────────────────────────────── */
+
+/* Periodic SPIFFS health check — runs every ~60 cron cycles (~1 hour) */
+static void cron_check_spiffs_health(void)
+{
+    static int s_check_counter = 0;
+    if (++s_check_counter < 60) return;
+    s_check_counter = 0;
+
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info(NULL, &total, &used) != ESP_OK || total == 0) return;
+
+    int pct = (int)(used * 100 / total);
+    if (pct >= 95) {
+        ESP_LOGE(TAG, "SPIFFS CRITICAL: %d%% used (%d/%d bytes) — storage nearly full!",
+                 pct, (int)used, (int)total);
+    } else if (pct >= 85) {
+        ESP_LOGW(TAG, "SPIFFS WARNING: %d%% used (%d/%d bytes)", pct, (int)used, (int)total);
+    }
+}
 
 static void cron_process_due_jobs(void)
 {
@@ -305,6 +344,9 @@ static void cron_task_main(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(MIMI_CRON_CHECK_INTERVAL_MS));
         cron_process_due_jobs();
+        cron_check_spiffs_health();
+        /* Service deferred heartbeat I/O (set by timer callback) */
+        heartbeat_poll();
     }
 }
 

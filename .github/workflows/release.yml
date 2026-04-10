@@ -28,22 +28,28 @@ jobs:
           . $IDF_PATH/export.sh
           VERSION="${GITHUB_REF_NAME}"
 
+          # Build SPIFFS image with initial data
+          python $IDF_PATH/components/spiffs/spiffsgen.py \
+            0xBD0000 spiffs_data build/spiffs.bin
+
           # Generate merged firmware for single-command flashing
           esptool.py --chip esp32s3 merge_bin \
             --flash_mode qio \
             --flash_size 16MB \
             --flash_freq 80m \
             -o "MimiClaw_AMOLED-full-${VERSION}.bin" \
-            0x0     build/bootloader/bootloader.bin \
-            0x8000  build/partition_table/partition-table.bin \
-            0xf000  build/ota_data_initial.bin \
-            0x20000 build/MimiClaw_AMOLED.bin
+            0x0      build/bootloader/bootloader.bin \
+            0x8000   build/partition_table/partition-table.bin \
+            0xf000   build/ota_data_initial.bin \
+            0x20000  build/MimiClaw_AMOLED.bin \
+            0x420000 build/spiffs.bin
 
           # Copy individual binaries with version suffix
           cp build/MimiClaw_AMOLED.bin              "MimiClaw_AMOLED-${VERSION}.bin"
           cp build/bootloader/bootloader.bin "bootloader-${VERSION}.bin"
           cp build/partition_table/partition-table.bin "partition-table-${VERSION}.bin"
           cp build/ota_data_initial.bin      "ota_data_initial-${VERSION}.bin"
+          cp build/spiffs.bin                "spiffs-${VERSION}.bin"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -79,8 +85,8 @@ jobs:
             After flashing, connect via serial (115200 baud) and configure:
 
             ```
-            wifi <ssid> <password>
-            reboot
+            set_wifi <ssid> <password>
+            restart
             ```
           files: |
             MimiClaw_AMOLED-full-${{ github.ref_name }}.bin
@@ -88,3 +94,4 @@ jobs:
             bootloader-${{ github.ref_name }}.bin
             partition-table-${{ github.ref_name }}.bin
             ota_data_initial-${{ github.ref_name }}.bin
+            spiffs-${{ github.ref_name }}.bin

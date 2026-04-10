@@ -48,7 +48,7 @@ MimiClaw-AMOLED 在原版 [MimiClaw](https://github.com/memovai/mimiclaw) 项目
 
 ### 前提条件
 
-- 已安装 ESP-IDF v5.5+
+- 已安装 ESP-IDF v5.3+（已测试 v5.3.2）
 - Python 3.10+
 
 ### 编译与烧录
@@ -229,19 +229,50 @@ mimi> restart
 ```
 MimiClaw-AMOLED/
 ├── main/
+│   ├── agent/
+│   │   ├── agent_loop.c         # ReAct 代理循环
+│   │   └── context_builder.c    # 系统提示词构建
+│   ├── bus/
+│   │   └── message_bus.c        # 入站/出站消息队列
+│   ├── channels/
+│   │   ├── telegram/telegram_bot.c  # Telegram 长轮询
+│   │   └── feishu/feishu_bot.c      # 飞书 WebSocket
+│   ├── cron/
+│   │   └── cron_service.c       # 定时任务调度
 │   ├── display/
-│   │   ├── display_manager.c   # QSPI 显示驱动
-│   │   ├── simple_gui.c        # 帧缓冲图形
-│   │   └── ui_main.c           # UI 控制器
+│   │   ├── display_manager.c    # QSPI 显示驱动
+│   │   ├── simple_gui.c         # 帧缓冲图形
+│   │   └── ui_main.c            # UI 控制器
+│   ├── gateway/
+│   │   └── ws_server.c          # WebSocket 服务器
+│   ├── heartbeat/
+│   │   └── heartbeat.c          # 周期心跳
+│   ├── llm/
+│   │   └── llm_proxy.c          # 多提供商 LLM API
+│   ├── memory/
+│   │   ├── memory_store.c       # 长期记忆
+│   │   └── session_mgr.c        # 按会话管理
 │   ├── peripherals/
-│   │   ├── boot_button.c       # 按键处理
-│   │   └── battery_adc.c       # 电池监控
-│   └── mimi_config.h           # 配置
-├── docs/
-│   ├── HARDWARE.md             # 硬件参考
-│   ├── DISPLAY_DRIVER.md       # 显示驱动文档
-│   └── TROUBLESHOOTING.md      # 故障排除指南
-└── spiffs_data/                # 记忆文件
+│   │   ├── boot_button.c        # 按键处理
+│   │   ├── battery_adc.c        # 电池监控
+│   │   └── time_sync.c          # NTP 时间同步
+│   ├── proxy/
+│   │   └── http_proxy.c         # HTTP/SOCKS5 代理
+│   ├── tools/
+│   │   ├── tool_registry.c      # 工具分发
+│   │   ├── tool_web_search.c    # Brave/Tavily 搜索
+│   │   ├── tool_files.c         # 文件读写列目录
+│   │   ├── tool_cron.c          # 定时任务管理
+│   │   └── tool_hardware.c      # GPIO/LED 控制
+│   ├── skills/
+│   │   └── skill_loader.c       # SPIFFS 技能加载器
+│   └── mimi_config.h            # 配置
+├── docs/                        # 开发者文档
+├── spiffs_data/                 # SPIFFS 初始数据
+│   ├── config/                  # SOUL.md, USER.md
+│   ├── memory/                  # MEMORY.md
+│   └── skills/                  # 技能定义文件
+└── .github/workflows/           # CI/CD
 ```
 
 ## 开发者文档

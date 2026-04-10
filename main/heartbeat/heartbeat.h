@@ -24,3 +24,10 @@ void heartbeat_stop(void);
  * Returns true if the agent was prompted, false if no tasks found.
  */
 bool heartbeat_trigger(void);
+
+/**
+ * Poll for pending heartbeat work. Call this from a task context
+ * (e.g. cron task loop) to execute deferred SPIFFS I/O that the
+ * timer callback cannot safely perform.
+ */
+void heartbeat_poll(void);

@@ -35,6 +35,7 @@ idf_component_register(
         "peripherals/boot_button.c"
         "peripherals/battery_adc.c"
         "peripherals/time_sync.c"
+        "peripherals/health_monitor.c"
     INCLUDE_DIRS
         "."
     REQUIRES

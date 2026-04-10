@@ -90,7 +90,11 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
         return ESP_ERR_INVALID_ARG;
     }
 
-    FILE *f = fopen(path, "w");
+    /* Write to temp file first for crash safety */
+    char tmp_path[128];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+    FILE *f = fopen(tmp_path, "w");
     if (!f) {
         snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
         cJSON_Delete(root);
@@ -103,6 +107,16 @@ esp_err_t tool_write_file_execute(const char *input_json, char *output, size_t o
 
     if (written != len) {
         snprintf(output, output_size, "Error: wrote %d of %d bytes to %s", (int)written, (int)len, path);
+        remove(tmp_path);
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    /* Atomic swap */
+    remove(path);
+    if (rename(tmp_path, path) != 0) {
+        snprintf(output, output_size, "Error: failed to finalize write to %s", path);
+        remove(tmp_path);
         cJSON_Delete(root);
         return ESP_FAIL;
     }
@@ -197,18 +211,37 @@ esp_err_t tool_edit_file_execute(const char *input_json, char *output, size_t ou
 
     free(buf);
 
-    /* Write back */
-    f = fopen(path, "w");
+    /* Write to temp file first for crash safety */
+    char tmp_path[128];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+    f = fopen(tmp_path, "w");
     if (!f) {
-        snprintf(output, output_size, "Error: cannot open file for writing: %s", path);
+        snprintf(output, output_size, "Error: cannot create temp file for: %s", path);
         free(result);
         cJSON_Delete(root);
         return ESP_FAIL;
     }
 
-    fwrite(result, 1, total, f);
+    size_t w = fwrite(result, 1, total, f);
     fclose(f);
     free(result);
+
+    if (w != total) {
+        snprintf(output, output_size, "Error: write incomplete (%d/%d bytes) for %s", (int)w, (int)total, path);
+        remove(tmp_path);
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+
+    /* Atomic swap */
+    remove(path);
+    if (rename(tmp_path, path) != 0) {
+        snprintf(output, output_size, "Error: failed to finalize edit of %s", path);
+        remove(tmp_path);
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
 
     snprintf(output, output_size, "OK: edited %s (replaced %d bytes with %d bytes)", path, (int)old_len, (int)new_len);
     ESP_LOGI(TAG, "edit_file: %s", path);

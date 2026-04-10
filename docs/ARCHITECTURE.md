@@ -7,58 +7,63 @@
 ## System Overview
 
 ```
-Telegram App (User)
-    │
-    │  HTTPS Long Polling
-    │
-    ▼
+Telegram App (User)         Feishu App (User)
+    │                           │
+    │  HTTPS Long Polling       │  WebSocket
+    │                           │
+    ▼                           ▼
 ┌──────────────────────────────────────────────────┐
 │               ESP32-S3 (MimiClaw)                │
 │                                                  │
 │   ┌─────────────┐       ┌──────────────────┐     │
 │   │  Telegram    │──────▶│   Inbound Queue  │     │
-│   │  Poller      │       └────────┬─────────┘     │
-│   │  (Core 0)    │               │                │
-│   └─────────────┘               ▼                │
-│                     ┌────────────────────────┐    │
-│   ┌─────────────┐  │     Agent Loop          │    │
-│   │  WebSocket   │─▶│     (Core 1)           │    │
-│   │  Server      │  │                        │    │
-│   │  (:18789)    │  │  Context ──▶ LLM Proxy │    │
-│   └─────────────┘  │  Builder      (HTTPS)   │    │
-│                     │       ▲          │      │    │
-│   ┌─────────────┐  │       │     tool_use?   │    │
-│   │  Serial CLI  │  │       │          ▼      │    │
-│   │  (Core 0)    │  │  Tool Results ◀─ Tools  │    │
-│   └─────────────┘  │              (web_search)│    │
-│                     └──────────┬─────────────┘    │
-│                                │                  │
-│                         ┌──────▼───────┐          │
-│                         │ Outbound Queue│          │
-│                         └──────┬───────┘          │
-│                                │                  │
-│                         ┌──────▼───────┐          │
-│                         │  Outbound    │          │
-│                         │  Dispatch    │          │
-│                         │  (Core 0)    │          │
-│                         └──┬────────┬──┘          │
-│                            │        │             │
-│                     Telegram    WebSocket          │
-│                     sendMessage  send              │
+│   │  Poller      │       │   (depth: 16)    │     │
+│   │  (Core 0)    │       └────────┬─────────┘     │
+│   └─────────────┘               │                │
+│                                  │                │
+│   ┌─────────────┐               ▼                │
+│   │  Feishu WS   │  ┌────────────────────────┐    │
+│   │  Client      │─▶│     Agent Loop          │    │
+│   │  (Core 0)    │  │     (Core 1)           │    │
+│   └─────────────┘  │                        │    │
+│                     │  Context ──▶ LLM Proxy │    │
+│   ┌─────────────┐  │  Builder   (Multi-LLM)  │    │
+│   │  WebSocket   │─▶│       ▲          │      │    │
+│   │  Server      │  │       │     tool_use?   │    │
+│   │  (:18789)    │  │       │          ▼      │    │
+│   └─────────────┘  │  Tool Results ◀─ Tools  │    │
+│                     │   (web_search, files,   │    │
+│   ┌─────────────┐  │    cron, gpio, time)    │    │
+│   │  Serial CLI  │  └──────────┬─────────────┘    │
+│   │  (Core 1)    │             │                  │
+│   └─────────────┘       ┌──────▼───────┐          │
+│                          │ Outbound Queue│          │
+│   ┌─────────────┐       └──────┬───────┘          │
+│   │  Cron Task   │             │                  │
+│   │  + Heartbeat │       ┌──────▼───────┐          │
+│   └─────────────┘       │  Outbound    │          │
+│                          │  Dispatch    │          │
+│   ┌─────────────┐       │  (Core 0)    │          │
+│   │  AMOLED GUI  │       └──┬───┬────┬──┘          │
+│   │  Display     │          │   │    │             │
+│   └─────────────┘     Telegram Feishu WebSocket    │
+│                       sendMsg  reply  send          │
 │                                                   │
 │   ┌──────────────────────────────────────────┐    │
 │   │  SPIFFS (12 MB)                          │    │
 │   │  /spiffs/config/  SOUL.md, USER.md       │    │
 │   │  /spiffs/memory/  MEMORY.md, YYYY-MM-DD  │    │
-│   │  /spiffs/sessions/ tg_<chat_id>.jsonl    │    │
+│   │  /spiffs/skills/  *.md skill definitions  │    │
+│   │  /spiffs/cron.json  scheduled tasks       │    │
+│   │  /spiffs/s*.jl  session history files     │    │
 │   └──────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────┘
          │
-         │  Anthropic Messages API (HTTPS)
-         │  + Brave Search API (HTTPS)
+         │  Anthropic / OpenAI / Ollama / OpenRouter
+         │  + Brave / Tavily Search API (HTTPS)
          ▼
    ┌───────────┐   ┌──────────────┐
-   │ Claude API │   │ Brave Search │
+   │  LLM API  │   │ Search API   │
    └───────────┘   └──────────────┘
 ```
 
@@ -108,13 +113,17 @@ main/
 │   ├── wifi_manager.h      WiFi STA lifecycle API
 │   └── wifi_manager.c      Event handler, exponential backoff
 │
-├── telegram/
-│   ├── telegram_bot.h      Bot init/start, send_message API
-│   └── telegram_bot.c      Long polling loop, JSON parsing, message splitting
+├── channels/
+│   ├── telegram/
+│   │   ├── telegram_bot.h  Bot init/start, send_message API
+│   │   └── telegram_bot.c  Long polling loop, JSON parsing, message splitting
+│   └── feishu/
+│       ├── feishu_bot.h    Feishu bot init/start API
+│       └── feishu_bot.c    WebSocket client, event card parsing, message routing
 │
 ├── llm/
 │   ├── llm_proxy.h         llm_chat() + llm_chat_tools() API, tool_use types
-│   └── llm_proxy.c         Anthropic Messages API (non-streaming), tool_use parsing
+│   └── llm_proxy.c         Multi-provider support (Anthropic/OpenAI/Ollama/OpenRouter/Custom)
 │
 ├── agent/
 │   ├── agent_loop.h        Agent task init/start
@@ -125,14 +134,19 @@ main/
 ├── tools/
 │   ├── tool_registry.h     Tool definition struct, register/dispatch API
 │   ├── tool_registry.c     Tool registration, JSON schema builder, dispatch by name
-│   ├── tool_web_search.h   Web search tool API
-│   └── tool_web_search.c   Brave Search API via HTTPS (direct + proxy)
+│   ├── tool_web_search.c   Brave/Tavily Search API via HTTPS (direct + proxy)
+│   ├── tool_files.c        File read/write/list_dir on SPIFFS
+│   ├── tool_cron.c         Cron job add/remove/list via agent tool_use
+│   ├── tool_get_time.c     Current time query tool
+│   ├── tool_hardware.c     LED control tool
+│   ├── tool_gpio.c         GPIO read/write tool
+│   └── gpio_policy.c       GPIO allowlist/safety policy
 │
 ├── memory/
 │   ├── memory_store.h      Long-term + daily memory API
 │   ├── memory_store.c      MEMORY.md read/write, daily .md append/read
 │   ├── session_mgr.h       Per-chat session API
-│   └── session_mgr.c       JSONL session files, ring buffer history
+│   └── session_mgr.c       JSONL session files, ring buffer history, auto-compaction
 │
 ├── gateway/
 │   ├── ws_server.h         WebSocket server API
@@ -140,15 +154,38 @@ main/
 │
 ├── proxy/
 │   ├── http_proxy.h        Proxy connection API
-│   └── http_proxy.c        HTTP CONNECT tunnel + TLS via esp_tls
+│   └── http_proxy.c        HTTP CONNECT + SOCKS5 tunnel + TLS via esp_tls
+│
+├── cron/
+│   ├── cron_service.h      Cron scheduler API
+│   └── cron_service.c      Persistent cron jobs (every/at), SPIFFS storage, .bak recovery
+│
+├── heartbeat/
+│   ├── heartbeat.h         Heartbeat service API
+│   └── heartbeat.c         Periodic HEARTBEAT.md check, deferred I/O via cron task
+│
+├── skills/
+│   └── skill_loader.c      Load SKILL.md files from SPIFFS into system prompt
 │
 ├── cli/
 │   ├── serial_cli.h        CLI init API
-│   └── serial_cli.c        esp_console REPL with debug/maintenance commands
+│   └── serial_cli.c        esp_console REPL with config/debug/maintenance commands
 │
-└── ota/
-    ├── ota_manager.h       OTA update API
-    └── ota_manager.c       esp_https_ota wrapper
+├── onboard/
+│   └── wifi_onboard.c      Captive portal for WiFi provisioning (AP mode)
+│
+├── display/
+│   ├── display_manager.c   RM67162 QSPI driver, DMA transfers
+│   ├── lcd_init_sequence.c RM67162 initialization sequence
+│   ├── simple_gui.c        Frame buffer graphics (RGB565, fonts, shapes)
+│   ├── ui_main.c           Multi-page UI controller (Home/System/Message/Logs)
+│   └── touch_cst816s.c     CST816S capacitive touch driver
+│
+└── peripherals/
+    ├── boot_button.c       Button handler (single/double/long press)
+    ├── battery_adc.c       Battery voltage ADC reading
+    ├── time_sync.c         SNTP time synchronization
+    └── health_monitor.c    System health monitoring
 ```
 
 ---
@@ -158,13 +195,16 @@ main/
 | Task               | Core | Priority | Stack  | Description                          |
 |--------------------|------|----------|--------|--------------------------------------|
 | `tg_poll`          | 0    | 5        | 12 KB  | Telegram long polling (30s timeout)  |
-| `agent_loop`       | 1    | 6        | 12 KB  | Message processing + Claude API call |
-| `outbound`         | 0    | 5        | 8 KB   | Route responses to Telegram / WS     |
-| `serial_cli`       | 0    | 3        | 4 KB   | USB serial console REPL              |
+| `feishu_ws`        | 0    | 5        | 12 KB  | Feishu WebSocket client              |
+| `agent_loop`       | 1    | 6        | 24 KB  | Message processing + LLM API call    |
+| `outbound`         | 0    | 4        | 12 KB  | Route responses to channels          |
+| `serial_cli`       | 1    | 6        | 4 KB   | USB serial console REPL              |
+| `cron`             | any  | 4        | 4 KB   | Scheduled task + heartbeat polling   |
+| `gui`              | any  | 5        | 8 KB   | AMOLED display rendering             |
 | httpd (internal)   | 0    | 5        | —      | WebSocket server (esp_http_server)   |
 | wifi_event (IDF)   | 0    | 8        | —      | WiFi event handling (ESP-IDF)        |
 
-**Core allocation strategy**: Core 0 handles I/O (network, serial, WiFi). Core 1 is dedicated to the agent loop (CPU-bound JSON building + waiting on HTTPS).
+**Core allocation strategy**: Core 0 handles I/O (network, serial, WiFi). Core 1 is dedicated to the agent loop (CPU-bound JSON building + waiting on HTTPS). CLI shares Core 1 at same priority to avoid blocking agent when idle.
 
 ---
 
@@ -225,20 +265,26 @@ Session files are JSONL (one JSON object per line):
 
 ## Configuration
 
-All configuration is done exclusively through `mimi_secrets.h` at build time. There is no runtime configuration — changing any setting requires `idf.py fullclean && idf.py build`.
+MimiClaw supports two layers of configuration:
 
-| Define                       | Description                             |
-|------------------------------|-----------------------------------------|
-| `MIMI_SECRET_WIFI_SSID`     | WiFi SSID                               |
-| `MIMI_SECRET_WIFI_PASS`     | WiFi password                           |
-| `MIMI_SECRET_TG_TOKEN`      | Telegram Bot API token                  |
-| `MIMI_SECRET_API_KEY`       | Anthropic API key                       |
-| `MIMI_SECRET_MODEL`         | Model ID (default: claude-opus-4-6)     |
-| `MIMI_SECRET_PROXY_HOST`    | HTTP proxy hostname/IP (optional)       |
-| `MIMI_SECRET_PROXY_PORT`    | HTTP proxy port (optional)              |
-| `MIMI_SECRET_SEARCH_KEY`    | Brave Search API key (optional)         |
+1. **Build-time secrets** (`mimi_secrets.h`): Compiled into firmware, highest priority
+2. **Runtime NVS overrides** (via CLI commands): Stored in NVS flash, persist across reboots
 
-NVS is still initialized (required by ESP-IDF WiFi internals) but is not used for application configuration.
+| Define                       | CLI Command                  | Description                             |
+|------------------------------|------------------------------|-----------------------------------------|
+| `MIMI_SECRET_WIFI_SSID`     | `set_wifi <ssid> <pass>`    | WiFi SSID                               |
+| `MIMI_SECRET_WIFI_PASS`     |                              | WiFi password                           |
+| `MIMI_SECRET_TG_TOKEN`      | `set_tg_token <token>`      | Telegram Bot API token                  |
+| `MIMI_SECRET_API_KEY`       | `set_api_key <key>`         | LLM API key                             |
+| `MIMI_SECRET_MODEL`         | `set_model <model>`         | Model ID (e.g. claude-sonnet-4, gpt-4o) |
+| `MIMI_SECRET_MODEL_PROVIDER`| `set_model_provider <p>`    | Provider: anthropic/openai/ollama/openrouter/custom |
+| `MIMI_SECRET_PROXY_HOST`    | `set_proxy <host> <port>`   | HTTP/SOCKS5 proxy hostname/IP (optional)|
+| `MIMI_SECRET_PROXY_PORT`    |                              | Proxy port (optional)                   |
+| `MIMI_SECRET_SEARCH_KEY`    | `set_search_key <key>`      | Brave Search API key (optional)         |
+| `MIMI_SECRET_TAVILY_KEY`    | `set_tavily_key <key>`      | Tavily Search API key (optional)        |
+| `MIMI_SECRET_FEISHU_APP_ID` | `set_feishu_creds <id> <s>` | Feishu app ID (optional)                |
+
+NVS values always override build-time secrets at runtime. Use `config_show` to display current (masked) configuration, `config_reset` to clear all NVS overrides.
 
 ---
 
@@ -254,8 +300,8 @@ typedef struct {
 } mimi_msg_t;
 ```
 
-- **Inbound queue**: channels → agent loop (depth: 8)
-- **Outbound queue**: agent loop → dispatch → channels (depth: 8)
+- **Inbound queue**: channels → agent loop (depth: 16)
+- **Outbound queue**: agent loop → dispatch → channels (depth: 16)
 - Content string ownership is transferred on push; receiver must `free()`.
 
 ---
@@ -278,7 +324,19 @@ Client `chat_id` is auto-assigned on connection (`ws_<fd>`) but can be overridde
 
 ---
 
-## Claude API Integration
+## LLM API Integration
+
+MimiClaw supports multiple LLM providers:
+
+| Provider    | API Format   | Endpoint                                    |
+|-------------|-------------|---------------------------------------------|
+| anthropic   | Anthropic   | `https://api.anthropic.com/v1/messages`     |
+| openai      | OpenAI      | `https://api.openai.com/v1/chat/completions`|
+| ollama      | OpenAI      | `http://<host>:<port>/v1/chat/completions`  |
+| openrouter  | OpenAI      | `https://openrouter.ai/api/v1/chat/completions` |
+| custom      | OpenAI      | User-configured URL                         |
+
+### Anthropic Format
 
 Endpoint: `POST https://api.anthropic.com/v1/messages`
 
@@ -363,18 +421,29 @@ If WiFi credentials are missing or connection times out, the CLI remains availab
 
 ## Serial CLI Commands
 
-The CLI provides debug and maintenance commands only. All configuration is done via `mimi_secrets.h`.
+The CLI provides debug, maintenance, and runtime configuration commands via USB serial console.
 
-| Command                        | Description                          |
-|--------------------------------|--------------------------------------|
-| `wifi_status`                  | Show connection status and IP        |
-| `memory_read`                  | Print MEMORY.md contents             |
-| `memory_write <CONTENT>`       | Overwrite MEMORY.md                  |
-| `session_list`                 | List all session files               |
-| `session_clear <CHAT_ID>`      | Delete a session file                |
-| `heap_info`                    | Show internal + PSRAM free bytes     |
-| `restart`                      | Reboot the device                    |
-| `help`                         | List all available commands           |
+| Command                          | Description                            |
+|----------------------------------|----------------------------------------|
+| `set_wifi <ssid> <pass>`         | Set WiFi credentials (NVS)            |
+| `set_tg_token <token>`           | Set Telegram bot token (NVS)          |
+| `set_api_key <key>`              | Set LLM API key (NVS)                 |
+| `set_model <model>`              | Set model ID (NVS)                    |
+| `set_model_provider <provider>`  | Set LLM provider (NVS)               |
+| `set_proxy <host> <port>`        | Set HTTP/SOCKS5 proxy (NVS)          |
+| `set_search_key <key>`           | Set Brave Search API key (NVS)       |
+| `set_tavily_key <key>`           | Set Tavily Search API key (NVS)      |
+| `set_feishu_creds <id> <secret>` | Set Feishu app credentials (NVS)     |
+| `config_show`                    | Display current config (masked)       |
+| `config_reset`                   | Clear all NVS overrides               |
+| `wifi_status`                    | Show connection status and IP         |
+| `memory_read`                    | Print MEMORY.md contents              |
+| `memory_write <CONTENT>`         | Overwrite MEMORY.md                   |
+| `session_list`                   | List all session files                |
+| `session_clear <CHAT_ID>`        | Delete a session file                 |
+| `heap_info`                      | Show internal + PSRAM free bytes      |
+| `restart`                        | Reboot the device                     |
+| `help`                           | List all available commands            |
 
 ---
 
@@ -386,13 +455,13 @@ The CLI provides debug and maintenance commands only. All configuration is done 
 | `agent/context.py`          | `agent/context_builder.c`      | Loads SOUL.md + USER.md + memory + tool guidance |
 | `agent/memory.py`           | `memory/memory_store.c`        | MEMORY.md + daily notes      |
 | `session/manager.py`        | `memory/session_mgr.c`         | JSONL per chat, ring buffer  |
-| `channels/telegram.py`      | `telegram/telegram_bot.c`      | Raw HTTP, no python-telegram-bot |
+| `channels/telegram.py`      | `channels/telegram/telegram_bot.c` | Raw HTTP, no python-telegram-bot |
 | `bus/events.py` + `queue.py`| `bus/message_bus.c`            | FreeRTOS queues vs asyncio   |
-| `providers/litellm_provider.py` | `llm/llm_proxy.c`         | Direct Anthropic API only    |
-| `config/schema.py`          | `mimi_config.h` + `mimi_secrets.h` | Build-time secrets only  |
+| `providers/litellm_provider.py` | `llm/llm_proxy.c`         | Multi-provider (Anthropic/OpenAI/Ollama/OpenRouter/Custom) |
+| `config/schema.py`          | `mimi_config.h` + `mimi_secrets.h` | Build-time + NVS runtime override |
 | `cli/commands.py`           | `cli/serial_cli.c`             | esp_console REPL             |
-| `agent/tools/*`             | `tools/tool_registry.c` + `tool_web_search.c` | web_search via Brave API |
+| `agent/tools/*`             | `tools/tool_registry.c` + `tool_*.c` | web_search, files, cron, gpio, time, hardware |
 | `agent/subagent.py`         | *(not yet implemented)*        | See TODO.md                  |
-| `agent/skills.py`           | *(not yet implemented)*        | See TODO.md                  |
-| `cron/service.py`           | *(not yet implemented)*        | See TODO.md                  |
-| `heartbeat/service.py`      | *(not yet implemented)*        | See TODO.md                  |
+| `agent/skills.py`           | `skills/skill_loader.c`        | Loads SKILL.md files from SPIFFS |
+| `cron/service.py`           | `cron/cron_service.c`          | every/at scheduling, persistent, .bak recovery |
+| `heartbeat/service.py`      | `heartbeat/heartbeat.c`       | Periodic HEARTBEAT.md check  |

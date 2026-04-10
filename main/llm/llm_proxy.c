@@ -91,10 +91,13 @@ static void safe_copy(char *dst, size_t dst_size, const char *src)
 
 /* ── Response buffer ──────────────────────────────────────────── */
 
+#define RESP_BUF_MAX_CAP  (4 * 1024 * 1024)  /* 4 MB hard limit */
+
 typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    bool error;
 } resp_buf_t;
 
 static esp_err_t resp_buf_init(resp_buf_t *rb, size_t initial_cap)
@@ -103,15 +106,26 @@ static esp_err_t resp_buf_init(resp_buf_t *rb, size_t initial_cap)
     if (!rb->data) return ESP_ERR_NO_MEM;
     rb->len = 0;
     rb->cap = initial_cap;
+    rb->error = false;
     return ESP_OK;
 }
 
 static esp_err_t resp_buf_append(resp_buf_t *rb, const char *data, size_t len)
 {
+    if (rb->error) return ESP_FAIL;
     while (rb->len + len >= rb->cap) {
         size_t new_cap = rb->cap * 2;
+        if (new_cap > RESP_BUF_MAX_CAP) {
+            ESP_LOGE(TAG, "Response buffer exceeded %d bytes limit",
+                     (int)RESP_BUF_MAX_CAP);
+            rb->error = true;
+            return ESP_ERR_NO_MEM;
+        }
         char *tmp = heap_caps_realloc(rb->data, new_cap, MALLOC_CAP_SPIRAM);
-        if (!tmp) return ESP_ERR_NO_MEM;
+        if (!tmp) {
+            rb->error = true;
+            return ESP_ERR_NO_MEM;
+        }
         rb->data = tmp;
         rb->cap = new_cap;
     }
@@ -127,6 +141,7 @@ static void resp_buf_free(resp_buf_t *rb)
     rb->data = NULL;
     rb->len = 0;
     rb->cap = 0;
+    rb->error = false;
 }
 
 /* ── Chunked transfer encoding decoder ───────────────────────── */
@@ -183,7 +198,9 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     resp_buf_t *rb = (resp_buf_t *)evt->user_data;
     if (evt->event_id == HTTP_EVENT_ON_DATA) {
-        resp_buf_append(rb, (const char *)evt->data, evt->data_len);
+        if (resp_buf_append(rb, (const char *)evt->data, evt->data_len) != ESP_OK) {
+            ESP_LOGW(TAG, "Response buffer append failed, data dropped");
+        }
     }
     return ESP_OK;
 }
@@ -823,7 +840,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
             cJSON *block;
             cJSON_ArrayForEach(block, content) {
                 cJSON *btype = cJSON_GetObjectItem(block, "type");
-                if (btype && strcmp(btype->valuestring, "text") == 0) {
+                if (btype && cJSON_IsString(btype) && strcmp(btype->valuestring, "text") == 0) {
                     cJSON *text = cJSON_GetObjectItem(block, "text");
                     if (text && cJSON_IsString(text)) {
                         total_text += strlen(text->valuestring);
@@ -837,7 +854,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
                 if (resp->text) {
                     cJSON_ArrayForEach(block, content) {
                         cJSON *btype = cJSON_GetObjectItem(block, "type");
-                        if (!btype || strcmp(btype->valuestring, "text") != 0) continue;
+                        if (!btype || !cJSON_IsString(btype) || strcmp(btype->valuestring, "text") != 0) continue;
                         cJSON *text = cJSON_GetObjectItem(block, "text");
                         if (!text || !cJSON_IsString(text)) continue;
                         size_t tlen = strlen(text->valuestring);
@@ -851,7 +868,7 @@ esp_err_t llm_chat_tools(const char *system_prompt,
             /* Extract tool_use blocks */
             cJSON_ArrayForEach(block, content) {
                 cJSON *btype = cJSON_GetObjectItem(block, "type");
-                if (!btype || strcmp(btype->valuestring, "tool_use") != 0) continue;
+                if (!btype || !cJSON_IsString(btype) || strcmp(btype->valuestring, "tool_use") != 0) continue;
                 if (resp->call_count >= MIMI_MAX_TOOL_CALLS) break;
 
                 llm_tool_call_t *call = &resp->calls[resp->call_count];

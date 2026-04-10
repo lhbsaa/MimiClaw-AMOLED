@@ -31,6 +31,7 @@
 #include "display/display_manager.h"
 #include "display/ui_main.h"
 #include "peripherals/battery_adc.h"
+#include "peripherals/health_monitor.h"
 
 static const char *TAG = "mimi";
 
@@ -66,6 +67,15 @@ static esp_err_t init_spiffs(void)
     size_t total = 0, used = 0;
     esp_spiffs_info(NULL, &total, &used);
     ESP_LOGI(TAG, "SPIFFS: total=%d, used=%d", (int)total, (int)used);
+
+    if (total > 0) {
+        int pct = (int)(used * 100 / total);
+        if (pct >= 95) {
+            ESP_LOGE(TAG, "SPIFFS CRITICAL: %d%% full — system may malfunction!", pct);
+        } else if (pct >= 85) {
+            ESP_LOGW(TAG, "SPIFFS WARNING: %d%% full", pct);
+        }
+    }
 
     return ESP_OK;
 }
@@ -207,6 +217,15 @@ void app_main(void)
         ESP_LOGI(TAG, "Battery ADC initialized successfully");
     } else {
         ESP_LOGW(TAG, "Battery ADC init failed: %s", esp_err_to_name(bat_err));
+    }
+    
+    /* Initialize Health Monitor */
+    ESP_LOGI(TAG, "Initializing Health Monitor...");
+    esp_err_t health_err = health_monitor_init();
+    if (health_err == ESP_OK) {
+        ESP_LOGI(TAG, "Health Monitor initialized successfully");
+    } else {
+        ESP_LOGW(TAG, "Health Monitor init failed: %s", esp_err_to_name(health_err));
     }
 
     /* Start Serial CLI after Display initialization */

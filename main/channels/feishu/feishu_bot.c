@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -14,6 +15,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
 #include "esp_event.h"
+#include "esp_task_wdt.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "cJSON.h"
 
@@ -40,7 +43,7 @@ static int s_ws_ping_interval_ms = 120000;
 static int s_ws_reconnect_interval_ms = 30000;
 static int s_ws_reconnect_nonce_ms = 30000;
 static int s_ws_service_id = 0;
-static bool s_ws_connected = false;
+static volatile bool s_ws_connected = false;
 
 static void handle_message_event(cJSON *event);
 
@@ -89,7 +92,10 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
                 new_cap = resp->len + evt->data_len + 1;
             }
             char *tmp = realloc(resp->buf, new_cap);
-            if (!tmp) return ESP_ERR_NO_MEM;
+            if (!tmp) {
+                ESP_LOGE(TAG, "HTTP response realloc failed (need %d bytes)", (int)new_cap);
+                return ESP_ERR_NO_MEM;
+            }
             resp->buf = tmp;
             resp->cap = new_cap;
         }
@@ -377,7 +383,7 @@ static char *feishu_api_call(const char *url, const char *method, const char *po
 {
     if (feishu_get_tenant_token() != ESP_OK) return NULL;
 
-    http_resp_t resp = { .buf = calloc(1, 4096), .len = 0, .cap = 4096 };
+    http_resp_t resp = { .buf = heap_caps_calloc(1, 4096, MALLOC_CAP_SPIRAM), .len = 0, .cap = 4096 };
     if (!resp.buf) return NULL;
 
     esp_http_client_config_t config = {
@@ -451,7 +457,7 @@ static esp_err_t feishu_pull_ws_config(void)
     cJSON_Delete(body);
     if (!json_str) return ESP_ERR_NO_MEM;
 
-    http_resp_t resp = { .buf = calloc(1, 4096), .len = 0, .cap = 4096 };
+    http_resp_t resp = { .buf = heap_caps_calloc(1, 4096, MALLOC_CAP_SPIRAM), .len = 0, .cap = 4096 };
     if (!resp.buf) {
         free(json_str);
         return ESP_ERR_NO_MEM;
@@ -607,9 +613,25 @@ static void feishu_ws_event_handler(void *arg, esp_event_base_t base, int32_t ev
 static void feishu_ws_task(void *arg)
 {
     (void)arg;
+    esp_task_wdt_add(NULL);
+
+    uint32_t reconnect_delay_ms = 5000;  /* Initial reconnect delay */
+    const uint32_t RECONNECT_DELAY_MAX = 300000;  /* Max 5 minutes */
+    const uint32_t RECONNECT_DELAY_INIT = 5000;   /* Reset value on success */
+
     while (1) {
+        esp_task_wdt_reset();
         if (feishu_pull_ws_config() != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            ESP_LOGW(TAG, "Failed to pull WS config, retry in %" PRIu32 "ms", reconnect_delay_ms);
+            esp_task_wdt_delete(NULL);
+            vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+            esp_task_wdt_add(NULL);
+            esp_task_wdt_reset();
+            /* Back off on config pull failure too */
+            if (reconnect_delay_ms < RECONNECT_DELAY_MAX) {
+                reconnect_delay_ms = reconnect_delay_ms * 2;
+                if (reconnect_delay_ms > RECONNECT_DELAY_MAX) reconnect_delay_ms = RECONNECT_DELAY_MAX;
+            }
             continue;
         }
 
@@ -619,13 +641,22 @@ static void feishu_ws_task(void *arg)
             .task_stack = MIMI_FEISHU_POLL_STACK,
             .reconnect_timeout_ms = s_ws_reconnect_interval_ms,
             .network_timeout_ms = 30000,  /* Increased from 10s to 30s */
+            .pingpong_timeout_sec = 30,   /* Detect dead connections faster than default 120s */
             .disable_auto_reconnect = false,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
 
         s_ws_client = esp_websocket_client_init(&ws_cfg);
         if (!s_ws_client) {
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            ESP_LOGW(TAG, "WS client init failed, retry in %" PRIu32 "ms", reconnect_delay_ms);
+            esp_task_wdt_delete(NULL);
+            vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+            esp_task_wdt_add(NULL);
+            esp_task_wdt_reset();
+            if (reconnect_delay_ms < RECONNECT_DELAY_MAX) {
+                reconnect_delay_ms = reconnect_delay_ms * 2;
+                if (reconnect_delay_ms > RECONNECT_DELAY_MAX) reconnect_delay_ms = RECONNECT_DELAY_MAX;
+            }
             continue;
         }
         esp_websocket_register_events(s_ws_client, WEBSOCKET_EVENT_ANY, feishu_ws_event_handler, NULL);
@@ -633,8 +664,15 @@ static void feishu_ws_task(void *arg)
 
         int64_t last_ping = 0;
         int disconnect_count = 0;
+        bool was_connected = false;
         while (s_ws_client) {
             if (s_ws_connected) {
+                if (!was_connected) {
+                    /* Connection established: reset backoff */
+                    was_connected = true;
+                    reconnect_delay_ms = RECONNECT_DELAY_INIT;
+                    ESP_LOGI(TAG, "WS connected, backoff reset to %"PRIu32"ms", reconnect_delay_ms);
+                }
                 int64_t now = esp_timer_get_time() / 1000;
                 if (now - last_ping >= s_ws_ping_interval_ms) {
                     ws_frame_t ping = {0};
@@ -663,13 +701,22 @@ static void feishu_ws_task(void *arg)
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(200));
+            esp_task_wdt_reset();
         }
-
-        esp_websocket_client_stop(s_ws_client);
         esp_websocket_client_destroy(s_ws_client);
         s_ws_client = NULL;
         s_ws_connected = false;
-        vTaskDelay(pdMS_TO_TICKS(5000));  /* Wait before reconnecting */
+
+        /* Exponential backoff before reconnecting */
+        ESP_LOGW(TAG, "WS reconnect in %" PRIu32 "ms", reconnect_delay_ms);
+        esp_task_wdt_delete(NULL);
+        vTaskDelay(pdMS_TO_TICKS(reconnect_delay_ms));
+        esp_task_wdt_add(NULL);
+        esp_task_wdt_reset();
+        if (reconnect_delay_ms < RECONNECT_DELAY_MAX) {
+            reconnect_delay_ms = reconnect_delay_ms * 2;
+            if (reconnect_delay_ms > RECONNECT_DELAY_MAX) reconnect_delay_ms = RECONNECT_DELAY_MAX;
+        }
     }
 }
 
@@ -853,6 +900,28 @@ esp_err_t feishu_bot_start(void)
     return ESP_OK;
 }
 
+/* ── Build interactive card JSON string with markdown content ── */
+static char *build_markdown_card(const char *markdown_text)
+{
+    cJSON *card = cJSON_CreateObject();
+    if (!card) return NULL;
+
+    cJSON_AddStringToObject(card, "schema", "2.0");
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON *elements = cJSON_CreateArray();
+    cJSON *md = cJSON_CreateObject();
+    cJSON_AddStringToObject(md, "tag", "markdown");
+    cJSON_AddStringToObject(md, "content", markdown_text);
+    cJSON_AddItemToArray(elements, md);
+    cJSON_AddItemToObject(body, "elements", elements);
+    cJSON_AddItemToObject(card, "body", body);
+
+    char *card_str = cJSON_PrintUnformatted(card);
+    cJSON_Delete(card);
+    return card_str;
+}
+
 esp_err_t feishu_send_message(const char *chat_id, const char *text)
 {
     if (s_app_id[0] == '\0' || s_app_secret[0] == '\0') {
@@ -879,16 +948,13 @@ esp_err_t feishu_send_message(const char *chat_id, const char *text)
             chunk = MIMI_FEISHU_MAX_MSG_LEN;
         }
 
-        char *segment = malloc(chunk + 1);
+        char *segment = heap_caps_malloc(chunk + 1, MALLOC_CAP_SPIRAM);
         if (!segment) return ESP_ERR_NO_MEM;
         memcpy(segment, text + offset, chunk);
         segment[chunk] = '\0';
 
-        /* Build content JSON: {"text":"..."} */
-        cJSON *content = cJSON_CreateObject();
-        cJSON_AddStringToObject(content, "text", segment);
-        char *content_str = cJSON_PrintUnformatted(content);
-        cJSON_Delete(content);
+        /* Build interactive card with markdown element */
+        char *content_str = build_markdown_card(segment);
         free(segment);
 
         if (!content_str) { offset += chunk; all_ok = 0; continue; }
@@ -896,7 +962,7 @@ esp_err_t feishu_send_message(const char *chat_id, const char *text)
         /* Build message body */
         cJSON *body = cJSON_CreateObject();
         cJSON_AddStringToObject(body, "receive_id", chat_id);
-        cJSON_AddStringToObject(body, "msg_type", "text");
+        cJSON_AddStringToObject(body, "msg_type", "interactive");
         cJSON_AddStringToObject(body, "content", content_str);
         free(content_str);
 
@@ -905,7 +971,6 @@ esp_err_t feishu_send_message(const char *chat_id, const char *text)
 
         if (json_str) {
             char *resp = feishu_api_call(url, "POST", json_str);
-            free(json_str);
 
             if (resp) {
                 cJSON *root = cJSON_Parse(resp);
@@ -923,9 +988,19 @@ esp_err_t feishu_send_message(const char *chat_id, const char *text)
                 }
                 free(resp);
             } else {
-                ESP_LOGE(TAG, "Failed to send message chunk");
-                all_ok = 0;
+                /* Retry once after brief delay (transient memory pressure from TLS/AES) */
+                ESP_LOGW(TAG, "Send attempt failed, retrying in 2s...");
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                resp = feishu_api_call(url, "POST", json_str);
+                if (resp) {
+                    ESP_LOGI(TAG, "Retry sent to %s (%d bytes)", chat_id, (int)chunk);
+                    free(resp);
+                } else {
+                    ESP_LOGE(TAG, "Failed to send message chunk after retry");
+                    all_ok = 0;
+                }
             }
+            free(json_str);
         }
 
         offset += chunk;
@@ -943,14 +1018,11 @@ esp_err_t feishu_reply_message(const char *message_id, const char *text)
     char url[256];
     snprintf(url, sizeof(url), FEISHU_REPLY_MSG_URL, message_id);
 
-    cJSON *content = cJSON_CreateObject();
-    cJSON_AddStringToObject(content, "text", text);
-    char *content_str = cJSON_PrintUnformatted(content);
-    cJSON_Delete(content);
+    char *content_str = build_markdown_card(text);
     if (!content_str) return ESP_ERR_NO_MEM;
 
     cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "msg_type", "text");
+    cJSON_AddStringToObject(body, "msg_type", "interactive");
     cJSON_AddStringToObject(body, "content", content_str);
     free(content_str);
 
